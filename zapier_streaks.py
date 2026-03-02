@@ -112,11 +112,8 @@ def _compute_streaks(results):
                     prev_status = _get_status_name(sorted_pages[1])
                     streak = prev_streak if prev_status == "yes" else 0
             else:
-                # Past page: normal logic
-                if _get_status_name(sorted_pages[0]) == "yes":
-                    streak = prev_streak + 1
-                else:
-                    streak = 0
+                # Most recent page isn't today: keep streak as-is
+                streak = prev_streak
         streaks[assignee] = streak
         most_recent_page[assignee] = sorted_pages[0]
     return streaks, most_recent_page
