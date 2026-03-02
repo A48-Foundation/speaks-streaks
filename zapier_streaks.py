@@ -2,6 +2,7 @@ import os
 import json
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
@@ -95,7 +96,7 @@ def _compute_streaks(results):
 
     streaks = {}
     most_recent_page = {}
-    today = datetime.now().date()
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     for assignee, pages in assignee_pages.items():
         sorted_pages = sorted(pages, key=_get_due_or_created, reverse=True)
         if len(sorted_pages) == 1:
