@@ -139,7 +139,7 @@ Every page in the database must have these properties. The scripts depend on the
 | `Status` | **Status** | ✅ | Must have **`Yes`** and **`No`** as status options. Debaters set this to `Yes` when they've spoken that day. This is the core input the streak calculation reads. |
 | `Due date` | **Date** | ✅ | The date this page is for. Used to sort pages chronologically and determine which page is "most recent." Set this to the current day when the page is created. |
 | `Streak` | **Number** | ✅ | **Auto-updated by the scripts** — do not fill in manually. `update_streaks.py` writes the calculated streak count here. `display_streaks.py` reads from here to build the leaderboard. |
-| `Discord User ID` | **Rich text** | ❌ Optional | The debater's Discord user ID (for future @mention support). Not currently used by the streak scripts. |
+
 
 ### 3. Set Up Recurring Pages
 
