@@ -487,9 +487,10 @@ async def send_morning_reminder():
         parts.append("")
         parts.extend(shoutouts)
     parts.append(leaderboard)
-    parts.append("React with 🧊 to freeze your streak.")
+    parts.append("React with 🔥 if you spoke today! React with 🧊 to freeze your streak.")
 
     sent = await channel.send("\n".join(parts))
+    await sent.add_reaction("🔥")
     await sent.add_reaction("🧊")
 
     today_str = datetime.now(PT).date().isoformat()
@@ -515,11 +516,12 @@ async def send_evening_reminder():
     parts = [
         f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
         leaderboard,
-        "React with 🔥 if you did!",
+        "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.",
     ]
 
     sent = await channel.send("\n".join(parts))
     await sent.add_reaction("🔥")
+    await sent.add_reaction("🧊")
 
     today_str = datetime.now(PT).date().isoformat()
     data = load_data()
@@ -663,10 +665,12 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     evening_ids = {m["id"]: m["date"] for m in data.get("evening_messages", [])}
     morning_ids = {m["id"]: m["date"] for m in data.get("morning_messages", [])}
 
-    if emoji == "🔥" and payload.message_id in evening_ids:
-        await _handle_fire(payload, evening_ids[payload.message_id])
-    elif emoji == "🧊" and payload.message_id in morning_ids:
-        await _handle_freeze(payload, morning_ids[payload.message_id])
+    all_reminder_ids = {**morning_ids, **evening_ids}
+
+    if emoji == "🔥" and payload.message_id in all_reminder_ids:
+        await _handle_fire(payload, all_reminder_ids[payload.message_id])
+    elif emoji == "🧊" and payload.message_id in all_reminder_ids:
+        await _handle_freeze(payload, all_reminder_ids[payload.message_id])
 
 
 async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
@@ -742,7 +746,7 @@ async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
                 parts = [
                     f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
                     leaderboard,
-                    "React with 🔥 if you did!",
+                    "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.",
                 ]
                 await message.edit(content="\n".join(parts))
             except discord.NotFound:
