@@ -405,7 +405,6 @@ async def send_morning_reminder():
     if shoutouts:
         parts.append("")
         parts.extend(shoutouts)
-    parts.append("")
     parts.append("Current Streaks:")
     parts.append(leaderboard)
     parts.append("")
@@ -436,7 +435,6 @@ async def send_evening_reminder():
 
     parts = [
         f"<@&{ROLE_ID}> Did you speak today?",
-        "",
         "Current Streaks:",
         leaderboard,
         "",
