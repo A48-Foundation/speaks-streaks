@@ -336,7 +336,7 @@ def format_leaderboard(streaks: dict) -> str:
 
 
 def get_milestone_shoutouts(streaks: dict) -> list[str]:
-    """Return shoutout strings for debaters who just crossed a 10-day milestone."""
+    """Return shoutout strings for debaters who hit exactly 10, 20, 30… today."""
     data = load_data()
     last_milestones = data.get("last_milestones", {})
     shoutouts = []
@@ -346,15 +346,15 @@ def get_milestone_shoutouts(streaks: dict) -> list[str]:
             last_milestones.pop(name, None)
             continue
 
-        current_milestone = (streak // 10) * 10
-        last = last_milestones.get(name, 0)
-
-        if current_milestone >= 10 and current_milestone > last:
-            shoutouts.append(
-                f"🎉 Congrats to **{name}** for hitting a "
-                f"**{current_milestone}-day** streak!"
-            )
-            last_milestones[name] = current_milestone
+        # Only celebrate on the exact day the milestone is reached
+        if streak % 10 == 0 and streak >= 10:
+            last = last_milestones.get(name, 0)
+            if streak > last:
+                shoutouts.append(
+                    f"🎉 Congrats to **{name}** for hitting a "
+                    f"**{streak}-day** streak!"
+                )
+                last_milestones[name] = streak
 
     data["last_milestones"] = last_milestones
     save_data(data)
@@ -481,14 +481,12 @@ async def send_morning_reminder():
 
     parts = [
         f"<@&{ROLE_ID}> Did you speak today? "
-        f"Update your streak [here]({NOTION_LINK})!",
+        f"Update your streak [here]({NOTION_LINK})! Current Streaks:",
     ]
     if shoutouts:
         parts.append("")
         parts.extend(shoutouts)
-    parts.append("Current Streaks:")
     parts.append(leaderboard)
-    parts.append("")
     parts.append("React with 🧊 to freeze your streak.")
 
     sent = await channel.send("\n".join(parts))
@@ -515,10 +513,8 @@ async def send_evening_reminder():
     leaderboard = format_leaderboard(streaks)
 
     parts = [
-        f"<@&{ROLE_ID}> Did you speak today?",
-        "Current Streaks:",
+        f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
         leaderboard,
-        "",
         "React with 🔥 if you did!",
     ]
 
@@ -744,10 +740,8 @@ async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
                 leaderboard = format_leaderboard(streaks)
 
                 parts = [
-                    f"<@&{ROLE_ID}> Did you speak today?",
-                    "Current Streaks:",
+                    f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
                     leaderboard,
-                    "",
                     "React with 🔥 if you did!",
                 ]
                 await message.edit(content="\n".join(parts))
