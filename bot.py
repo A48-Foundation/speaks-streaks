@@ -674,7 +674,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 
 async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
-    """🔥 reaction: mark page as Yes and update streak."""
+    """🔥 reaction: mark page as Yes, update streak, edit the reminder message."""
     member = payload.member
     if not member:
         return
@@ -729,13 +729,32 @@ async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
         new_streak = prev_streak + 1
         notion.update_page_status_and_streak(debater_page["id"], "Yes", new_streak)
 
-        if channel:
-            emojis = fire_emojis(new_streak)
-            await channel.send(
-                f"✅ **{matched_name}**'s streak updated to **{new_streak}**!{emojis}"
-            )
-
         log.info("🔥 %s marked Yes for %s — streak=%d", matched_name, date_str, new_streak)
+
+        # Re-fetch streaks and edit the original evening message with updated table
+        if channel:
+            try:
+                message = await channel.fetch_message(payload.message_id)
+
+                data = load_data()
+                frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+                streaks, _ = compute_streaks(frozen_map)
+                # Override with the just-computed value in case cache is stale
+                streaks[matched_name] = new_streak
+                leaderboard = format_leaderboard(streaks)
+
+                parts = [
+                    f"<@&{ROLE_ID}> Did you speak today?",
+                    "Current Streaks:",
+                    leaderboard,
+                    "",
+                    "React with 🔥 if you did!",
+                ]
+                await message.edit(content="\n".join(parts))
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log.warning("Could not edit evening message: %s", e)
 
     except Exception as e:
         log.exception("Error handling 🔥 for %s: %s", display_name, e)
