@@ -59,6 +59,7 @@ def _default_data() -> dict:
         "morning_messages": [],
         "evening_messages": [],
         "last_page_statuses": {},
+        "name_cache": {},
     }
 
 
@@ -362,13 +363,93 @@ def get_milestone_shoutouts(streaks: dict) -> list[str]:
 
 # ─── Name matching ────────────────────────────────────────────────────────────
 
+def _fuzzy_score(discord_name: str, notion_name: str) -> float:
+    """Score how well a Discord display name matches a Notion assignee name.
+
+    Returns a value between 0 and 1.  Higher is better.
+    Handles cases like "Caine(Neo Cai)" matching "Neo Cai".
+    """
+    d = discord_name.lower()
+    n = notion_name.lower()
+
+    # Exact match
+    if d == n:
+        return 1.0
+
+    # One contains the other
+    if n in d or d in n:
+        return 0.9
+
+    # Check if all parts of the Notion name appear in the Discord name
+    n_parts = n.split()
+    if n_parts and all(part in d for part in n_parts):
+        return 0.85
+
+    # Check if all parts of the Discord name appear in the Notion name
+    # (strip common parenthetical / bracket wrappers first)
+    import re
+    d_clean = re.sub(r"[(){}\[\]|/\\,]", " ", d)
+    d_parts = [p for p in d_clean.split() if len(p) > 1]
+    if d_parts and all(part in n for part in d_parts):
+        return 0.8
+
+    # Partial overlap: count how many words match
+    d_words = set(d_clean.split())
+    n_words = set(n.split())
+    overlap = d_words & n_words
+    if overlap:
+        return 0.5 * len(overlap) / max(len(d_words), len(n_words))
+
+    return 0.0
+
+
 def match_display_name(display_name: str, assignee_names) -> str | None:
-    """Case-insensitive match of a Discord display name to a Notion assignee."""
+    """Match a Discord display name to a Notion assignee.
+
+    1. Check the persistent cache first (instant).
+    2. Try exact case-insensitive match.
+    3. Fall back to fuzzy matching (score ≥ 0.6).
+    4. Cache the result so future lookups are free.
+    """
+    data = load_data()
+    cache = data.get("name_cache", {})
+
+    # Cache hit
+    if display_name in cache:
+        cached = cache[display_name]
+        # Verify the cached name still exists in the current assignee list
+        if cached in assignee_names:
+            return cached
+
     lower = display_name.lower()
+
+    # Exact match
     for name in assignee_names:
         if name.lower() == lower:
+            _cache_name(display_name, name)
             return name
+
+    # Fuzzy match — pick the best score above threshold
+    best_name = None
+    best_score = 0.0
+    for name in assignee_names:
+        score = _fuzzy_score(display_name, name)
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    if best_score >= 0.6 and best_name:
+        _cache_name(display_name, best_name)
+        return best_name
+
     return None
+
+
+def _cache_name(display_name: str, notion_name: str):
+    """Persist a Discord → Notion name pairing."""
+    data = load_data()
+    data.setdefault("name_cache", {})[display_name] = notion_name
+    save_data(data)
 
 
 def _all_notion_names(all_pages: list) -> set[str]:
