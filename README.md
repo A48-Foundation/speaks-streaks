@@ -1,13 +1,15 @@
 # sQuolingo Speaks Streaks 🔥
 
-Track consecutive speaking streaks for debate team members using a Notion database, and announce them automatically to Discord via Zapier.
+Track consecutive speaking streaks for debate team members using a Notion database and a Discord bot.
 
 ## Overview
 
-Each debater has a daily Notion page with a **"Did you speak today?"** task. The system:
+Each debater has scheduled Notion pages with a **"Did you speak today?"** task. The Discord bot:
 
-1. **Calculates** each person's consecutive "Yes" streak and writes it back to Notion
-2. **Displays** a formatted leaderboard table in Discord
+1. **Morning reminder (9 AM PT):** Posts the streak leaderboard, milestone shoutouts, and a link to update Notion. Debaters can react with 🧊 to freeze their streak.
+2. **Evening reminder (9 PM PT):** Posts the leaderboard and asks debaters to react with 🔥 if they spoke. The bot updates Notion and their streak automatically.
+3. **Streak freezes:** Reacting with 🧊 preserves your streak for the day even if you don't speak.
+4. **Milestone shoutouts:** Every 10-day milestone (10, 20, 30…) gets a shoutout, and the leaderboard shows extra 🔥 emojis.
 
 ---
 
@@ -15,101 +17,15 @@ Each debater has a daily Notion page with a **"Did you speak today?"** task. The
 
 | File | Purpose |
 |---|---|
-| `update_streaks.py` | Calculates streaks and updates each assignee's `Streak` property in Notion |
-| `display_streaks.py` | Reads the `Streak` property from Notion and builds a Discord-formatted table |
-| `zapier_streaks.py` | All-in-one: calculates streaks, updates Notion, **and** outputs the Discord table |
-| `squolingo.py` | Local development/testing script — dumps Notion data to `db.json` |
-| `.env` | Stores `NOTION_TOKEN` and `DATABASE_ID` (not committed to git) |
-
----
-
-## Zapier Flow — sQuolingo Announcer
-
-The Zap runs on a daily schedule and sends streak leaderboards to Discord twice (morning + evening check-in).
-
-```
-┌─────────────────────────────────────────┐
-│  1. Schedule by Zapier                  │
-│     Reminder at 9 AM                    │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  2. Code by Zapier — Calculate Streaks  │
-│     Paste: update_streaks.py            │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  3. Code by Zapier — Display Streaks    │
-│     Paste: display_streaks.py           │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  4. Discord — Send Channel Message      │
-│     Message Body: Step 3's table output │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  5. Delay by Zapier — Delay For         │
-│     Wait until evening check-in         │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  6. Code by Zapier — Display Streaks    │
-│     Paste: display_streaks.py           │
-└──────────────────┬──────────────────────┘
-                   ▼
-┌─────────────────────────────────────────┐
-│  7. Discord — Send Channel Message      │
-│     Message Body: Step 6's table output │
-└─────────────────────────────────────────┘
-```
-
-### Step-by-Step Setup
-
-#### 1. Schedule by Zapier
-- **Trigger:** Every Day
-- **Time:** 9:00 AM (or your preferred morning time)
-
-#### 2. Code by Zapier — Calculate Streaks
-- **Action:** Run Python
-- **Code:** Paste the contents of `update_streaks.py`
-- **Input Data:** None required (token and database ID are hardcoded in the script)
-- **What it does:** Fetches all pages from Notion, computes each debater's current streak, and PATCHes the `Streak` number property on their most recent page. Skips updates where the streak hasn't changed.
-
-> ⚠️ **For Zapier:** Since Zapier's Code step can't read `.env` files, you must **hardcode** `NOTION_TOKEN` and `DATABASE_ID` directly in the script. Replace the `load_dotenv()` / `os.environ` lines with:
-> ```python
-> NOTION_TOKEN = "your_token_here"
-> DATABASE_ID = "your_database_id_here"
-> ```
-
-#### 3. Code by Zapier — Display Streaks
-- **Action:** Run Python
-- **Code:** Paste the contents of `display_streaks.py`
-- **Input Data:** None required
-- **What it does:** Reads each assignee's `Streak` number from their most recent Notion page and formats a Discord-friendly leaderboard table.
-- **Output:** `table` (the formatted code block) and `streaks_json`
-
-#### 4. Discord — Send Channel Message
-- **Channel:** Your announcements/streaks channel
-- **Message Body:** Map to **Step 3 → Table** output
-- The message will look like:
-  ```
-  Debater              Streak
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Neo Cai 🔥               12
-  Jerry Song 🔥              7
-  Oliver Chen                0
-  ```
-
-#### 5. Delay by Zapier
-- **Delay For:** Set to however long you want between the morning and evening announcements (e.g., 10 hours)
-
-#### 6. Code by Zapier — Display Streaks (again)
-- Same as Step 3 — paste `display_streaks.py` again
-- This re-reads streaks from Notion so it picks up any changes made during the day
-
-#### 7. Discord — Send Channel Message
-- Same as Step 4 — map to **Step 6 → Table** output
+| `bot.py` | Discord bot — scheduled reminders, reaction handlers, streak logic |
+| `notion_client.py` | Notion API helper module — fetch/update pages, statuses, streaks |
+| `bot_data.json` | Persistent runtime data — freezes, message IDs, milestones |
+| `requirements.txt` | Python dependencies |
+| `update_streaks.py` | *(Legacy)* Standalone streak calculator for Zapier |
+| `display_streaks.py` | *(Legacy)* Standalone leaderboard formatter for Zapier |
+| `zapier_streaks.py` | *(Legacy)* All-in-one Zapier script |
+| `squolingo.py` | Local dev/testing — dumps Notion data to `db.json` |
+| `.env` | Tokens and config (not committed to git) |
 
 ---
 
@@ -166,7 +82,7 @@ To automatically create a page every day for each debater:
 3. In your Notion database, click **⋯** → **Connections** → **Connect to** → select your integration
 4. Store the token in your `.env` file (for local use) or hardcode it in the Zapier Code step
 
-### 5. How the Scripts Use These Properties
+### 5. How the Bot Uses These Properties
 
 ```
 Page created daily:
@@ -175,45 +91,75 @@ Page created daily:
 │ Assignee:   Neo Cai                          │
 │ Due date:   2026-02-28                       │
 │ Status:     No  ← debater changes to "Yes"   │
-│ Streak:     0   ← script updates to 12       │
+│ Streak:     0   ← bot updates to 12          │
 └──────────────────────────────────────────────┘
 
-update_streaks.py logic:
+bot.py streak logic:
   1. Fetches all pages, groups by Assignee
   2. Sorts each person's pages by Due date (newest first)
-  3. Reads the Streak number from the 2nd most recent page
-  4. If the most recent page Status = "Yes" → new streak = previous + 1
-  5. If "No" and today's page → grace period (carries streak if yesterday was "Yes")
-  6. If "No" and past page → streak resets to 0
-  7. PATCHes the Streak property on the most recent page
-
-display_streaks.py logic:
-  1. Fetches all pages, finds each person's most recent page
-  2. Reads the Streak number directly (no recalculation)
-  3. Formats a sorted leaderboard table for Discord
+  3. Walks backwards counting consecutive "Yes" pages
+  4. Today's "No" is skipped (grace period — hasn't done it yet)
+  5. Past "No" with 🧊 freeze counts as continued
+  6. Past "No" without freeze breaks the streak
+  7. Updates the Streak property on the most recent page
 ```
 
 ---
 
-## Local Development
+## Setup
 
-To run scripts locally (not on Zapier):
+### 1. Prerequisites
+- Python 3.10+
+- A Discord bot with **Message Content**, **Server Members**, and **Reactions** intents enabled
+- A Notion integration connected to your database
 
-1. Clone the repo
-2. Create a `.env` file in the project root:
-   ```
-   NOTION_TOKEN=ntn_your_token_here
-   DATABASE_ID=30f8d3b7-301c-800d-b7a2-eac33f994ea4
-   ```
-3. Install dependencies:
-   ```
-   pip install requests python-dotenv
-   ```
-4. Run:
-   ```
-   python update_streaks.py     # Calculate & update streaks
-   python display_streaks.py    # Generate Discord table
-   ```
+### 2. Environment Variables
+
+Create a `.env` file in the project root:
+```
+NOTION_TOKEN=ntn_your_token_here
+DATABASE_ID=30f8d3b7-301c-800d-b7a2-eac33f994ea4
+DISCORD_TOKEN=your_discord_bot_token
+CHANNEL_ID=your_channel_id
+LOCKED_IN_ROLE_ID=your_role_id
+NOTION_LINK=https://www.notion.so/your_database_link
+```
+
+### 3. Install & Run
+
+```bash
+pip install -r requirements.txt
+python bot.py
+```
+
+### 4. Discord Bot Permissions
+
+The bot requires these **Gateway Intents** (enable in the Discord Developer Portal):
+- `MESSAGE_CONTENT`
+- `GUILD_MEMBERS`
+- `GUILD_MESSAGE_REACTIONS`
+
+### 5. Commands
+
+| Command | Description |
+|---|---|
+| `!streaks` | Display the current streak leaderboard on demand |
+
+### 6. Reactions
+
+| Emoji | On Message | Effect |
+|---|---|---|
+| 🔥 | Evening reminder | Marks your Notion page as "Yes" and updates your streak |
+| 🧊 | Morning reminder | Freezes your streak for the day (prevents reset) |
+
+### 7. Streak Rules
+
+- **Schedule-aware:** Only days where you have a Notion page count. No page = no change.
+- **Grace period:** Today's "No" just means you haven't done it yet — your streak stays.
+- **Reset:** If a past day's page is still "No" (and no freeze), your streak resets to 0.
+- **Freeze:** 🧊 protects your streak for one day. Uses are tracked.
+- **Milestones:** Every 10-day milestone (10, 20, 30…) gets a shoutout and an extra 🔥 in the leaderboard.
+- **Fire scaling:** 1–9 days = 🔥, 10–19 = 🔥🔥, 20–29 = 🔥🔥🔥, etc.
 
 ---
 
