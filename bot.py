@@ -401,7 +401,6 @@ async def send_morning_reminder():
     parts = [
         f"<@&{ROLE_ID}> Did you speak today? "
         f"Update your streak [here]({NOTION_LINK})!",
-        "React with 🧊 to freeze your streak.",
     ]
     if shoutouts:
         parts.append("")
@@ -409,8 +408,11 @@ async def send_morning_reminder():
     parts.append("")
     parts.append("Current Streaks:")
     parts.append(leaderboard)
+    parts.append("")
+    parts.append("React with 🧊 to freeze your streak.")
 
     sent = await channel.send("\n".join(parts))
+    await sent.add_reaction("🧊")
 
     today_str = datetime.now(PT).date().isoformat()
     data = load_data()  # reload in case of concurrent writes
@@ -433,13 +435,16 @@ async def send_evening_reminder():
     leaderboard = format_leaderboard(streaks)
 
     parts = [
-        f"<@&{ROLE_ID}> Did you speak today? React with 🔥 if you did!",
+        f"<@&{ROLE_ID}> Did you speak today?",
         "",
         "Current Streaks:",
         leaderboard,
+        "",
+        "React with 🔥 if you did!",
     ]
 
     sent = await channel.send("\n".join(parts))
+    await sent.add_reaction("🔥")
 
     today_str = datetime.now(PT).date().isoformat()
     data = load_data()
