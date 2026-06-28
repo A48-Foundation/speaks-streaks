@@ -25,6 +25,7 @@ NOTION_LINK = os.environ["NOTION_LINK"]
 
 PT = ZoneInfo("America/Los_Angeles")
 BOT_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
+FROZEN_DATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frozen_dates.json")
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -66,6 +67,24 @@ def _default_data() -> dict:
 def save_data(data: dict):
     with open(BOT_DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def load_frozen_dates() -> dict[str, set[str]]:
+    """Load frozen dates from the persistent git-tracked JSON file."""
+    try:
+        with open(FROZEN_DATES_FILE, "r") as f:
+            raw = json.load(f)
+        return {k: set(v) for k, v in raw.items()}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_frozen_dates(frozen_map: dict[str, set[str]]):
+    """Save frozen dates to the persistent git-tracked JSON file."""
+    serializable = {k: sorted(v) for k, v in frozen_map.items()}
+    with open(FROZEN_DATES_FILE, "w") as f:
+        json.dump(serializable, f, indent=2)
+        f.write("\n")
 
 
 # ─── Streak computation ──────────────────────────────────────────────────────
@@ -499,7 +518,7 @@ async def send_morning_reminder():
         return
 
     data = load_data()
-    frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+    frozen_map = load_frozen_dates()
 
     # Sync yesterday's stored streak values before displaying
     process_previous_day(frozen_map)
@@ -538,7 +557,7 @@ async def send_evening_reminder():
         return
 
     data = load_data()
-    frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+    frozen_map = load_frozen_dates()
 
     streaks, _ = compute_streaks(frozen_map)
     leaderboard = format_leaderboard(streaks)
@@ -589,7 +608,7 @@ async def midnight_task():
     """12:30 AM PT — process the day that just ended and reset poll cache."""
     try:
         data = load_data()
-        frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+        frozen_map = load_frozen_dates()
         process_previous_day(frozen_map)
 
         # Clear cached statuses for the new day
@@ -769,7 +788,7 @@ async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
                 message = await channel.fetch_message(payload.message_id)
 
                 data = load_data()
-                frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+                frozen_map = load_frozen_dates()
                 streaks, _ = compute_streaks(frozen_map)
                 # Override with the just-computed value in case cache is stale
                 streaks[matched_name] = new_streak
@@ -815,15 +834,14 @@ async def _handle_freeze(payload: discord.RawReactionActionEvent, date_str: str)
             return
 
         data = load_data()
+        frozen_map = load_frozen_dates()
 
         # Ensure structures exist
-        if matched_name not in data.get("frozen_dates", {}):
-            data.setdefault("frozen_dates", {})[matched_name] = []
         if matched_name not in data.get("freeze_counts", {}):
             data.setdefault("freeze_counts", {})[matched_name] = 0
 
         # Prevent double-freeze on the same day
-        if date_str in data["frozen_dates"][matched_name]:
+        if date_str in frozen_map.get(matched_name, set()):
             total = data["freeze_counts"][matched_name]
             if channel:
                 await channel.send(
@@ -832,8 +850,12 @@ async def _handle_freeze(payload: discord.RawReactionActionEvent, date_str: str)
                 )
             return
 
-        data["frozen_dates"][matched_name].append(date_str)
-        data["freeze_counts"][matched_name] += 1
+        # Save to persistent frozen_dates.json
+        frozen_map.setdefault(matched_name, set()).add(date_str)
+        save_frozen_dates(frozen_map)
+
+        # Also update bot_data for freeze count
+        data["freeze_counts"][matched_name] = data.get("freeze_counts", {}).get(matched_name, 0) + 1
         save_data(data)
 
         total = data["freeze_counts"][matched_name]
@@ -857,7 +879,7 @@ async def streaks_cmd(ctx):
     """Display the current streak leaderboard."""
     try:
         data = load_data()
-        frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+        frozen_map = load_frozen_dates()
         streaks, _ = compute_streaks(frozen_map)
         leaderboard = format_leaderboard(streaks)
         await ctx.send("Current Streaks:\n" + leaderboard)
@@ -891,7 +913,7 @@ async def _cmd_report_scores(message):
     """@squolingo report scores — send the current leaderboard."""
     try:
         data = load_data()
-        frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+        frozen_map = load_frozen_dates()
         streaks, _ = compute_streaks(frozen_map)
         leaderboard = format_leaderboard(streaks)
         await message.channel.send("Current Streaks:\n" + leaderboard)
@@ -907,7 +929,7 @@ async def _cmd_audit_streaks(message):
             "🔍 Running full streak audit and syncing all pages..."
         )
         data = load_data()
-        frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+        frozen_map = load_frozen_dates()
 
         # Full sync: walk ALL pages chronologically and fix stored Streak values
         fixed = sync_all_streaks(frozen_map)
@@ -967,7 +989,7 @@ async def on_ready():
 
     # Sync streaks on startup
     data = load_data()
-    frozen_map = {k: set(v) for k, v in data.get("frozen_dates", {}).items()}
+    frozen_map = load_frozen_dates()
 
     if not data.get("morning_messages"):
         # First run ever — full sync of all pages
