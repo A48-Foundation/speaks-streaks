@@ -199,7 +199,7 @@ def audit_streaks(frozen_dates_map: dict | None = None):
                 if status == "yes":
                     streak += 1
                 elif page_date.isoformat() in frozen:
-                    streak += 1
+                    continue  # Frozen day — streak maintained, not incremented
                 else:
                     break
 
