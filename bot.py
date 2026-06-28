@@ -79,6 +79,34 @@ def _group_by_assignee(pages: list) -> dict[str, list]:
     return groups
 
 
+def _deduplicate_pages(pages: list) -> list:
+    """Remove duplicate pages for the same date, keeping the one with highest streak.
+
+    If multiple pages share the same due date, this keeps only the most
+    authoritative one (highest streak value, or earliest creation time as tiebreaker).
+    """
+    by_date: dict[str, list] = {}
+    for page in pages:
+        d = notion.get_due_date(page).date().isoformat()
+        by_date.setdefault(d, []).append(page)
+
+    deduped = []
+    for date_str, date_pages in by_date.items():
+        if len(date_pages) == 1:
+            deduped.append(date_pages[0])
+        else:
+            # Prefer highest streak; tiebreak by earliest created_time
+            best = max(
+                date_pages,
+                key=lambda p: (
+                    notion.get_streak(p),
+                    -(notion.parse_datetime(p.get("created_time", "")).timestamp()),
+                ),
+            )
+            deduped.append(best)
+    return deduped
+
+
 def compute_streaks(frozen_dates_map: dict | None = None):
     """Efficient streak computation — reads stored Streak values from recent pages.
 
@@ -99,7 +127,8 @@ def compute_streaks(frozen_dates_map: dict | None = None):
     most_recent_pages = {}
 
     for assignee, page_list in assignee_pages.items():
-        sorted_pages = sorted(page_list, key=notion.get_due_date, reverse=True)
+        deduped = _deduplicate_pages(page_list)
+        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
         most_recent = sorted_pages[0]
         most_recent_date = notion.get_due_date(most_recent).date()
         most_recent_pages[assignee] = most_recent
@@ -152,7 +181,8 @@ def audit_streaks(frozen_dates_map: dict | None = None):
     most_recent_pages = {}
 
     for assignee, page_list in assignee_pages.items():
-        sorted_pages = sorted(page_list, key=notion.get_due_date, reverse=True)
+        deduped = _deduplicate_pages(page_list)
+        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
         frozen = frozen_dates_map.get(assignee, set())
 
         streak = 0
@@ -196,10 +226,9 @@ def process_previous_day(frozen_dates_map: dict | None = None):
     assignee_pages = _group_by_assignee(recent_pages)
 
     for assignee, page_list in assignee_pages.items():
-        sorted_pages = sorted(page_list, key=notion.get_due_date, reverse=True)
+        deduped = _deduplicate_pages(page_list)
+        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
         frozen = frozen_dates_map.get(assignee, set())
-
-        # Find yesterday's page and the page before it
         yesterday_page = None
         prev_page = None
         for i, page in enumerate(sorted_pages):
@@ -253,7 +282,8 @@ def sync_all_streaks(frozen_dates_map: dict | None = None) -> int:
     fixed = 0
 
     for assignee, page_list in assignee_pages.items():
-        sorted_pages = sorted(page_list, key=notion.get_due_date)  # oldest first
+        deduped = _deduplicate_pages(page_list)
+        sorted_pages = sorted(deduped, key=notion.get_due_date)  # oldest first
         frozen = frozen_dates_map.get(assignee, set())
 
         prev_streak = 0
@@ -609,9 +639,10 @@ async def poll_notion_changes():
                 # Debater marked Yes in Notion — compute and update streak
                 since = today - timedelta(days=14)
                 recent_pages = notion.get_recent_pages(since)
+                debater_raw = [p for p in recent_pages
+                               if assignee in notion.get_assignee_names(p)]
                 debater_pages = sorted(
-                    [p for p in recent_pages
-                     if assignee in notion.get_assignee_names(p)],
+                    _deduplicate_pages(debater_raw),
                     key=notion.get_due_date,
                     reverse=True,
                 )
@@ -699,8 +730,9 @@ async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
             return
 
         # Find this debater's pages, sorted newest first
+        debater_raw = [p for p in recent_pages if matched_name in notion.get_assignee_names(p)]
         debater_pages = sorted(
-            [p for p in recent_pages if matched_name in notion.get_assignee_names(p)],
+            _deduplicate_pages(debater_raw),
             key=notion.get_due_date,
             reverse=True,
         )
