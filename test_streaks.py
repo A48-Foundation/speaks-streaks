@@ -62,7 +62,7 @@ class StreakTests(unittest.TestCase):
         data["participants"]["1"] = new_person("Hidden", [1], date(2026, 10, 20))
         data["participants"]["2"] = new_person("Visible", [1], date(2026, 10, 20), 7)
         data["legacy_scores"]["LegacyZero"] = {"streak": 0}
-        text = bot.format_leaderboard(data)
+        text = str(bot.leaderboard_embed(data, date(2026, 10, 20)).to_dict())
         self.assertIn("Visible", text)
         self.assertNotIn("Hidden", text)
         self.assertNotIn("LegacyZero", text)
@@ -109,6 +109,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.state = patch.multiple(
             bot, _state=bot._default_data(), _state_message=Mock(),
             _state_revision=0, _saved_revision=0, _action_lock=asyncio.Lock(),
+            _view_registered=False,
         )
         self.state.start()
         self.addCleanup(self.state.stop)
@@ -264,9 +265,10 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
                   "reconcile_task", "persist_state_task")}
         clock = Mock()
         clock.now.return_value = bot.datetime(2026, 11, 1, 13, tzinfo=bot.PT)
+        client = Mock(get_channel=Mock(return_value=self.channel))
         with patch.multiple(bot, **loops), patch.object(bot, "datetime", clock), \
                 patch.object(bot, "today_pt", return_value=date(2026, 11, 1)), \
-                patch.object(bot, "bot", Mock(get_channel=Mock(return_value=self.channel))), \
+                patch.object(bot, "bot", client), \
                 patch.object(bot, "persist_discord_state", AsyncMock()) as persist, \
                 patch.object(bot, "refresh_reminders", AsyncMock()):
             await bot.on_ready()
@@ -276,6 +278,66 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         notices = [call for call in self.channel.send.call_args_list
                    if "recovery applied" in call.args[0]]
         self.assertEqual(len(notices), 1)
+        client.add_view.assert_called_once()
+        self.assertTrue(client.add_view.call_args.args[0].is_persistent())
+
+    async def test_spoke_button_and_fire_reaction_cannot_double_credit(self):
+        data = bot.load_data()
+        data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 7)
+        data["morning_messages"] = [{"id": 10, "date": "2026-10-20"}]
+        bot.save_data(data)
+        view = bot.ReminderView()
+        interaction = Mock(user=self.member, channel=self.channel, message=Mock(id=10),
+                           response=Mock(defer=AsyncMock()),
+                           followup=Mock(send=AsyncMock()))
+        with patch.object(bot, "persist_discord_state", AsyncMock()), \
+                patch.object(bot, "refresh_reminders", AsyncMock()):
+            await view.children[0].callback(interaction)
+            await bot.handle_action(self.member, "yes", self.channel, "2026-10-20")
+        self.assertEqual(bot.load_data()["participants"]["5"]["streak"], 8)
+        interaction.response.defer.assert_awaited_with(ephemeral=True)
+
+    async def test_old_reminder_button_cannot_record_today(self):
+        data = bot.load_data()
+        data["morning_messages"] = [{"id": 10, "date": "2026-10-19"}]
+        bot.save_data(data)
+        interaction = Mock(user=self.member, channel=self.channel, message=Mock(id=10),
+                           response=Mock(send_message=AsyncMock()))
+        with patch.object(bot, "handle_action", AsyncMock()) as action:
+            await bot.ReminderView().children[0].callback(interaction)
+        action.assert_not_awaited()
+        self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
+
+    async def test_schedule_button_opens_own_schedule_modal(self):
+        data = bot.load_data()
+        data["participants"]["5"] = new_person("Debater", [1, 3], date(2026, 10, 20))
+        bot.save_data(data)
+        interaction = Mock(user=self.member, response=Mock(send_modal=AsyncMock()))
+        await bot.ReminderView().children[2].callback(interaction)
+        modal = interaction.response.send_modal.call_args.args[0]
+        self.assertEqual(modal.frequency.default, "tue, thu")
+
+    async def test_week_button_is_private(self):
+        data = bot.load_data()
+        data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 7)
+        bot.save_data(data)
+        interaction = Mock(user=self.member, response=Mock(send_message=AsyncMock()))
+        await bot.ReminderView().children[3].callback(interaction)
+        self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
+        self.assertIn("Your speaking week",
+                      interaction.response.send_message.call_args.kwargs["embed"].title)
+
+    async def test_major_milestone_sends_one_animation_not_on_repeat(self):
+        data = bot.load_data()
+        data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 49)
+        bot.save_data(data)
+        with patch.object(bot, "persist_discord_state", AsyncMock()), \
+                patch.object(bot, "refresh_reminders", AsyncMock()):
+            await bot.handle_action(self.member, "yes", self.channel)
+            await bot.handle_action(self.member, "yes", self.channel)
+        animated = [call for call in self.channel.send.call_args_list if "file" in call.kwargs]
+        self.assertEqual(len(animated), 1)
+        self.assertEqual(animated[0].kwargs["embed"].image.url, "attachment://milestone.gif")
 
 
 if __name__ == "__main__":

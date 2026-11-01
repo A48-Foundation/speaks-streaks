@@ -15,7 +15,7 @@ LOCKED_IN_ROLE_ID=your_role_id
 
 Enable Message Content and Server Members intents in the Discord Developer
 Portal. Grant View Channel, Read Message History, Send Messages, Attach Files,
-and Add Reactions permissions.
+Add Reactions, and Embed Links permissions.
 
 ```text
 pip install -r requirements.txt
@@ -64,6 +64,26 @@ syntax is `@Squolingo schedule daily` or
 - Today's reminder tables are edited after actions without removing reactions.
 - Congratulations are sent only when an action reaches exactly 10, 20, 30, etc.
 - Zero-streak debaters are hidden, not deleted: their schedules still exist.
+
+## Live cards and milestones
+
+Reminders now show a ranked Discord embed with medals, tier badges, progress
+to the next major milestone, and today's speaking/freeze status. Zero streaks
+stay hidden. Cards update after speaking, freezing, and schedule changes.
+
+Persistent **Spoke**, **Freeze**, **My schedule**, and **My week** buttons
+work after restarts. My schedule opens a form; My week shows a private
+seven-day completion grid. Old reminder action buttons cannot backdate credit.
+Emoji reactions and mention commands still work.
+
+Milestones at **50, 100, 200, 300**, and each later hundred get an original,
+locally generated confetti GIF card. Other ten-day milestones retain a simple
+congratulation. Duplicate actions and leaderboard refreshes do not replay
+celebrations. GIF playback depends on the viewer's Discord motion settings.
+
+The bot needs **Embed Links** permission in addition to the permissions above.
+Use `@Squolingo test reminders` to preview both cards without granting speaking
+credit or replaying milestone celebrations.
 
 ## Discord persistence and migration
 

@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
+from streak_display import leaderboard_embed, milestone_gif, tier, week_embed
 
 load_dotenv()
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
@@ -28,6 +29,7 @@ _state_revision = 0
 _saved_revision = -1
 _state_lock = asyncio.Lock()
 _action_lock = asyncio.Lock()
+_view_registered = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("squolingo")
@@ -205,30 +207,11 @@ def recover_october_totals(data, today):
     return True
 
 
-def format_leaderboard(data):
-    rows = [(p["name"], p["streak"]) for p in data["participants"].values()]
-    rows.extend((name, p["streak"]) for name, p in data["legacy_scores"].items())
-    rows = sorted((row for row in rows if row[1] > 0), key=lambda row: (-row[1], row[0]))
-    if not rows:
-        return "No active streaks yet. Set your schedule with `!schedule daily`."
-    lines = ["```", f"{'Debater':<40} Streak", "━" * 48]
-    for index, (name, streak) in enumerate(rows):
-        label = re.sub(r"[`\r\n]", "", name)[:32]
-        label += " " + "🔥" * min(streak // 10 + 1, 24)
-        line = f"{label:<40} {streak}"
-        if len("\n".join(lines + [line])) > 1600:
-            lines.append(f"... {len(rows) - index} more active streaks")
-            break
-        lines.append(line)
-    return "\n".join(lines + ["```"])
-
-
 def reminder_content(data):
     return (
         f"<@&{ROLE_ID}> Did you speak today? Current Streaks:\n"
-        f"{format_leaderboard(data)}\n"
-        "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.\n"
-        "Set your schedule: `!schedule daily` or `!schedule mon wed fri`."
+        "Use the buttons below, or react with 🔥 to record speaking / 🧊 to freeze.\n"
+        "Need instructions? `@Squolingo help`."
     )
 
 
@@ -240,7 +223,8 @@ async def send_reminder(kind):
         _reconcile_all(data, today)
         save_data(data)
         await persist_discord_state(channel)
-        sent = await channel.send(reminder_content(data))
+        sent = await channel.send(reminder_content(data),
+                                  embed=leaderboard_embed(data, today), view=ReminderView())
         key = f"{kind}_messages"
         data[key].append({"id": sent.id, "date": today.isoformat()})
         data[key] = data[key][-14:]
@@ -265,7 +249,9 @@ async def refresh_reminders(channel, data):
             if item["date"] == today:
                 try:
                     message = await channel.fetch_message(item["id"])
-                    await message.edit(content=reminder_content(data))
+                    await message.edit(content=reminder_content(data),
+                                       embed=leaderboard_embed(data, today_pt()),
+                                       view=ReminderView())
                 except discord.NotFound:
                     continue
                 except discord.HTTPException:
@@ -315,20 +301,22 @@ async def set_schedule(member, text, channel):
     label = ", ".join(DAYS[day].title() for day in days) if days else "off (paused)"
     await channel.send(f"{member.mention} Schedule: **{label}** (Pacific time). "
                        f"Streak: **{person['streak']}**.")
+    await refresh_reminders(channel, load_data())
 
 
 async def handle_action(member, action, channel, reminder_date=None):
     async with _action_lock:
         today = today_pt()
         if reminder_date is not None and reminder_date != today.isoformat():
-            await channel.send(f"{member.mention} That reminder's Pacific day has ended.")
-            return
+            text = "That reminder's Pacific day has ended."
+            await channel.send(f"{member.mention} {text}")
+            return text
         data = load_data()
         person = data["participants"].get(str(member.id))
         if person is None:
-            await channel.send(f"{member.mention} Set your schedule first: "
-                               "`!schedule daily` or `!schedule mon wed fri`.")
-            return
+            text = "Set your schedule first with **My schedule** or `!schedule daily`."
+            await channel.send(f"{member.mention} {text}")
+            return text
         person["name"] = member.display_name
         text, milestone = record(person, today, action)
         save_data(data)
@@ -336,8 +324,123 @@ async def handle_action(member, action, channel, reminder_date=None):
         await refresh_reminders(channel, data)
         await channel.send(f"{member.mention} {text}")
         if milestone:
-            await channel.send(f"🎉 Congrats to {member.mention} for hitting a "
-                               f"**{person['streak']}-day** streak!")
+            await celebrate_milestone(member, person["streak"], channel)
+        return text
+
+
+async def celebrate_milestone(member, streak, channel):
+    content = f"🎉 Congrats to {member.mention} for hitting a **{streak}-day** streak!"
+    if streak != 50 and streak % 100 != 0:
+        await channel.send(content)
+        return
+    badge, color = tier(streak)
+    embed = discord.Embed(title=f"{badge} · {streak} speaks!",
+                          description="One commitment at a time. A milestone worth celebrating.",
+                          color=color)
+    embed.set_image(url="attachment://milestone.gif")
+    animation = await asyncio.to_thread(milestone_gif, member.display_name, streak)
+    file = discord.File(animation, filename="milestone.gif")
+    try:
+        await channel.send(content, embed=embed, file=file)
+    finally:
+        file.close()
+
+
+class ScheduleModal(discord.ui.Modal, title="Your speaking schedule"):
+    frequency = discord.ui.TextInput(
+        label="Daily, weekdays, or off",
+        placeholder="daily  /  mon, wed, fri  /  off",
+        max_length=80,
+    )
+
+    def __init__(self, person):
+        super().__init__()
+        if person:
+            self.frequency.default = (
+                ", ".join(DAYS[d] for d in person["schedule"]) or "off"
+            )
+
+    async def on_submit(self, interaction):
+        try:
+            parse_schedule(self.frequency.value)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await set_schedule(interaction.user, self.frequency.value, interaction.channel)
+        await interaction.followup.send("Your schedule is saved.", ephemeral=True)
+
+    async def on_error(self, interaction, error):
+        log.error("Schedule modal failed: %s", error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Couldn't save your schedule. Please retry.",
+                                            ephemeral=True)
+        else:
+            await interaction.response.send_message("Couldn't save your schedule. Please retry.",
+                                                    ephemeral=True)
+
+
+class ReminderView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def interaction_check(self, interaction):
+        if (_state_message is None or not interaction.guild_id
+                or interaction.channel_id != CHANNEL_ID):
+            await interaction.response.send_message("The bot is restoring state. Please retry.",
+                                                    ephemeral=True)
+            return False
+        return True
+
+    async def _record(self, interaction, action):
+        data = load_data()
+        reminders = {item["id"]: item["date"]
+                     for key in ("morning_messages", "evening_messages")
+                     for item in data[key]}
+        reminder_date = reminders.get(interaction.message.id)
+        if reminder_date != today_pt().isoformat():
+            await interaction.response.send_message("Use today's reminder or `!speak` / `!freeze`.",
+                                                    ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        text = await handle_action(interaction.user, action, interaction.channel, reminder_date)
+        await interaction.followup.send(text, ephemeral=True)
+
+    @discord.ui.button(label="Spoke", emoji="🔥", style=discord.ButtonStyle.success,
+                       custom_id="squolingo:spoke")
+    async def spoke(self, interaction, button):
+        await self._record(interaction, "yes")
+
+    @discord.ui.button(label="Freeze", emoji="🧊", style=discord.ButtonStyle.secondary,
+                       custom_id="squolingo:freeze")
+    async def freeze(self, interaction, button):
+        await self._record(interaction, "frozen")
+
+    @discord.ui.button(label="My schedule", emoji="📅", style=discord.ButtonStyle.primary,
+                       custom_id="squolingo:schedule")
+    async def schedule(self, interaction, button):
+        person = load_data()["participants"].get(str(interaction.user.id))
+        await interaction.response.send_modal(ScheduleModal(person))
+
+    @discord.ui.button(label="My week", emoji="📊", style=discord.ButtonStyle.secondary,
+                       custom_id="squolingo:week")
+    async def week(self, interaction, button):
+        data = load_data()
+        person = data["participants"].get(str(interaction.user.id))
+        if person is None:
+            await interaction.response.send_message("Choose **My schedule** first.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=week_embed(person, today_pt()),
+                                                ephemeral=True)
+
+    async def on_error(self, interaction, error, item):
+        log.error("Reminder button failed: %s", error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Couldn't finish that action. Please retry.",
+                                            ephemeral=True)
+        else:
+            await interaction.response.send_message("Couldn't finish that action. Please retry.",
+                                                    ephemeral=True)
 
 
 async def repair_total(actor, argument, channel):
@@ -430,6 +533,8 @@ async def dispatch(member, text, channel):
             "(Manage Server permission required).\n"
             "Both reminders accept 🔥 for speaking and 🧊 for a freeze. "
             "Repeat reactions count only once; reactions are kept.\n"
+            "You can also use **Spoke**, **Freeze**, **My schedule**, and **My week** buttons. "
+            "Major milestones at 50, 100, 200, 300 (and each later hundred) get animated cards.\n"
             "All schedules use Pacific time. Only missed scheduled days reset "
             "your streak, after the day ends. Unscheduled days do not change it.\n"
             "Set your own schedule before recording speaking. "
@@ -457,7 +562,7 @@ async def dispatch(member, text, channel):
             _reconcile_all(data, today_pt())
             save_data(data)
             await persist_discord_state(channel)
-            await channel.send("Current Streaks:\n" + format_leaderboard(data))
+            await channel.send(embed=leaderboard_embed(data, today_pt()))
     elif text.lower() == "test reminders":
         await send_morning_reminder()
         await send_evening_reminder()
@@ -521,6 +626,7 @@ async def persist_state_task():
 
 @bot.event
 async def on_ready():
+    global _view_registered
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
         log.error("Discord state channel unavailable.")
@@ -534,6 +640,10 @@ async def on_ready():
             _reconcile_all(data, today_pt())
             save_data(data)
             await persist_discord_state(channel)
+        if not _view_registered:
+            bot.add_view(ReminderView())
+            _view_registered = True
+        await refresh_reminders(channel, load_data())
         if recovered:
             await refresh_reminders(channel, data)
             await channel.send(
