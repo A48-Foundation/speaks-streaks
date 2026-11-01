@@ -280,16 +280,7 @@ async def reminder_cards(data, today):
         return [fallback], []
     if not images:
         return [fallback], []
-    embeds = []
-    for index in range(len(images)):
-        embed = discord.Embed.from_dict(fallback.to_dict())
-        embed.clear_fields()
-        if index:
-            embed.title = "Speaking streaks (continued)"
-            embed.description = None
-        embed.set_image(url=f"attachment://shark-race-{index + 1}.gif")
-        embeds.append(embed)
-    return embeds, images
+    return [], images
 
 
 async def clear_reminder_reactions(message):

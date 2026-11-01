@@ -70,6 +70,8 @@ syntax is `@Squolingo schedule daily` or
 ## Live cards and milestones
 
 Reminders show animated, original pixel-art shark races using **real streaks**.
+Race GIFs are regular message attachments rather than narrow embed images;
+Discord's client controls their final display width.
 Each debater keeps a name-based color and shark type (reef, hammerhead, tiger,
 or whale) even when ranks change. Larger, crisp **Silkscreen** pixel-font status text
 under each name reads **spoke today**, **frozen**, or **not yet**; ice surrounds

@@ -180,9 +180,9 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         render.assert_called_with(data, date(2026, 10, 20))
         sent = self.channel.send.call_args.kwargs
         self.assertEqual(sent["files"][0].filename, "shark-race-1.gif")
-        self.assertEqual(sent["embeds"][0].image.url, "attachment://shark-race-1.gif")
-        self.assertEqual(len(sent["embeds"][0].fields), 0)
+        self.assertEqual(sent["embeds"], [])
         edited = reminder.edit.call_args.kwargs
+        self.assertEqual(edited["embeds"], [])
         self.assertEqual(len(edited["attachments"]), 1)
         self.assertIsNot(sent["files"][0], edited["attachments"][0])
 
@@ -207,8 +207,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.send.await_count, 4)
         for call in self.channel.send.call_args_list:
             self.assertEqual(call.kwargs["files"][0].filename, "shark-race-1.gif")
-            self.assertEqual(call.kwargs["embeds"][0].image.url,
-                             "attachment://shark-race-1.gif")
+            self.assertEqual(call.kwargs["embeds"], [])
 
     async def test_speaking_edits_reminders_without_removing_reactions(self):
         data = bot.load_data()
