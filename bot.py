@@ -7,6 +7,8 @@ and keeps Notion streak data in sync.
 import os
 import json
 import logging
+import asyncio
+import io
 from datetime import datetime, time, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -24,8 +26,15 @@ ROLE_ID = int(os.environ["LOCKED_IN_ROLE_ID"])
 NOTION_LINK = os.environ["NOTION_LINK"]
 
 PT = ZoneInfo("America/Los_Angeles")
-BOT_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
-FROZEN_DATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frozen_dates.json")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_DATA_FILE = os.path.join(APP_DIR, "bot_data.json")
+FROZEN_DATES_FILE = os.path.join(APP_DIR, "frozen_dates.json")
+STATE_MARKER = "Squolingo persistent state v1 - do not delete."
+_state = None
+_state_message = None
+_state_revision = 0
+_saved_revision = -1
+_state_lock = asyncio.Lock()
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -45,10 +54,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ─── Persistent data ─────────────────────────────────────────────────────────
 
 def load_data() -> dict:
+    if _state is not None:
+        return json.loads(json.dumps(_state))
     try:
         with open(BOT_DATA_FILE, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         return _default_data()
 
 
@@ -65,26 +76,85 @@ def _default_data() -> dict:
 
 
 def save_data(data: dict):
-    with open(BOT_DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    global _state, _state_revision
+    _state = json.loads(json.dumps(data))
+    _state_revision += 1
 
 
 def load_frozen_dates() -> dict[str, set[str]]:
-    """Load frozen dates from the persistent git-tracked JSON file."""
-    try:
-        with open(FROZEN_DATES_FILE, "r") as f:
-            raw = json.load(f)
-        return {k: set(v) for k, v in raw.items()}
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """Read Discord-backed freeze history, or legacy files during migration."""
+    if _state is not None:
+        return {k: set(v) for k, v in _state.get("frozen_dates", {}).items()}
+    frozen = {}
+    for path in [FROZEN_DATES_FILE]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            continue
+        for name, dates in raw.items():
+            frozen.setdefault(name, set()).update(dates)
+    for name, dates in load_data().get("frozen_dates", {}).items():
+        frozen.setdefault(name, set()).update(dates)
+    return frozen
 
 
 def save_frozen_dates(frozen_map: dict[str, set[str]]):
-    """Save frozen dates to the persistent git-tracked JSON file."""
-    serializable = {k: sorted(v) for k, v in frozen_map.items()}
-    with open(FROZEN_DATES_FILE, "w") as f:
-        json.dump(serializable, f, indent=2)
-        f.write("\n")
+    """Update freeze history in the Discord-backed state."""
+    data = load_data()
+    data["frozen_dates"] = {k: sorted(v) for k, v in frozen_map.items()}
+    save_data(data)
+
+
+async def restore_discord_state(channel):
+    global _state_message, _state, _state_revision, _saved_revision
+    async for message in channel.history(limit=None):
+        if message.author.id == bot.user.id and message.content == STATE_MARKER:
+            if len(message.attachments) != 1:
+                raise ValueError("Discord state attachment is missing.")
+            data = json.loads(await message.attachments[0].read())
+            if not isinstance(data, dict) or not isinstance(data.get("frozen_dates"), dict):
+                raise ValueError("Invalid Discord state; refusing to reset it.")
+            _state = data
+            _state_message = message
+            _state_revision = 0
+            _saved_revision = 0
+            return
+    # Only the first migration reads local seed/runtime files.
+    frozen = load_frozen_dates()
+    data = load_data()
+    data["frozen_dates"] = {k: sorted(v) for k, v in frozen.items()}
+    save_data(data)
+    await persist_discord_state(channel)
+
+
+async def persist_discord_state(channel=None):
+    global _state_message, _saved_revision
+    async with _state_lock:
+        if _state is None or _saved_revision == _state_revision:
+            return
+        channel = channel or bot.get_channel(CHANNEL_ID)
+        if channel is None:
+            raise RuntimeError("Cannot persist state: Discord channel unavailable.")
+        revision = _state_revision
+        payload = json.dumps(_state, ensure_ascii=True).encode("utf-8")
+        attachment = discord.File(io.BytesIO(payload), filename="squolingo-state.json")
+        try:
+            if _state_message is None:
+                _state_message = await channel.send(STATE_MARKER, file=attachment)
+            else:
+                await _state_message.edit(content=STATE_MARKER, attachments=[attachment])
+        finally:
+            attachment.close()
+        _saved_revision = revision
+
+
+@tasks.loop(seconds=10)
+async def persist_state_task():
+    try:
+        await persist_discord_state()
+    except Exception:
+        log.exception("Failed saving state to Discord; will retry.")
 
 
 # ─── Streak computation ──────────────────────────────────────────────────────
@@ -547,6 +617,7 @@ async def send_morning_reminder():
     data["morning_messages"].append({"id": sent.id, "date": today_str})
     data["morning_messages"] = data["morning_messages"][-14:]
     save_data(data)
+    await persist_discord_state(channel)
     log.info("Morning reminder sent for %s", today_str)
 
 
@@ -577,6 +648,7 @@ async def send_evening_reminder():
     data["evening_messages"].append({"id": sent.id, "date": today_str})
     data["evening_messages"] = data["evening_messages"][-14:]
     save_data(data)
+    await persist_discord_state(channel)
     log.info("Evening reminder sent for %s", today_str)
 
 
@@ -693,6 +765,7 @@ async def poll_notion_changes():
                 log.info("Poll: %s reverted from Yes — streak reset", assignee)
 
         if changed:
+            data = load_data()
             data["last_page_statuses"] = last_statuses
             save_data(data)
 
@@ -704,6 +777,8 @@ async def poll_notion_changes():
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if _state_message is None:
+        return
     if payload.user_id == bot.user.id:
         return
     if not payload.guild_id:
@@ -850,13 +925,11 @@ async def _handle_freeze(payload: discord.RawReactionActionEvent, date_str: str)
                 )
             return
 
-        # Save to persistent frozen_dates.json
         frozen_map.setdefault(matched_name, set()).add(date_str)
-        save_frozen_dates(frozen_map)
-
-        # Also update bot_data for freeze count
+        data["frozen_dates"] = {k: sorted(v) for k, v in frozen_map.items()}
         data["freeze_counts"][matched_name] = data.get("freeze_counts", {}).get(matched_name, 0) + 1
         save_data(data)
+        await persist_discord_state(channel)
 
         total = data["freeze_counts"][matched_name]
         if channel:
@@ -987,24 +1060,31 @@ async def _cmd_test_reminders(message):
 async def on_ready():
     log.info("Bot logged in as %s (ID: %s)", bot.user, bot.user.id)
 
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel is None:
+        log.error("Cannot restore Discord state: channel unavailable.")
+        return
+    try:
+        if _state_message is None:
+            await restore_discord_state(channel)
+        else:
+            await persist_discord_state(channel)
+    except Exception:
+        log.exception("Cannot restore Discord state; startup aborted to protect streaks.")
+        return
+
     # Sync streaks on startup
     data = load_data()
     frozen_map = load_frozen_dates()
 
-    if not data.get("morning_messages"):
-        # First run ever — full sync of all pages
-        log.info("First run detected — running full streak sync...")
-        try:
-            fixed = sync_all_streaks(frozen_map)
-            log.info("Initial sync complete — fixed %d page(s)", fixed)
-        except Exception as e:
-            log.exception("Failed initial streak sync: %s", e)
-    else:
-        # Regular startup — sync yesterday only
+    save_frozen_dates(frozen_map)
+    if data.get("morning_messages"):
         try:
             process_previous_day(frozen_map)
         except Exception as e:
             log.exception("Failed startup streak sync: %s", e)
+    else:
+        log.warning("No reminder history; preserving stored streaks, skipping full sync.")
 
     # Check if we missed today's reminders (e.g. bot was down)
     today_str = datetime.now(PT).date().isoformat()
@@ -1040,6 +1120,8 @@ async def on_ready():
         midnight_task.start()
     if not poll_notion_changes.is_running():
         poll_notion_changes.start()
+    if not persist_state_task.is_running():
+        persist_state_task.start()
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

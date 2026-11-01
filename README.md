@@ -132,6 +132,29 @@ pip install -r requirements.txt
 python bot.py
 ```
 
+### Discord-backed state (no Railway volume required)
+
+The bot maintains one message in its configured Discord channel labeled
+`Squolingo persistent state v1 - do not delete.` Its JSON attachment stores
+freeze dates, counts, reminder IDs, milestones, name matches, and poll state.
+The bot reads this message on startup and replaces its attachment as state
+changes. No runtime JSON files are written to Railway.
+
+Grant **View Channel**, **Read Message History**, **Send Messages**, and
+**Attach Files**. Do not delete the state message or its channel. Changing
+`CHANNEL_ID` requires moving the state to the new channel first. A corrupt
+state attachment aborts startup rather than silently resetting state.
+
+The first migration imports any available local JSON history and the committed
+freeze seed. Missing historical freezes cannot be recovered from that seed.
+Freeze acknowledgements and reminder IDs are saved immediately; other state
+updates are checkpointed every 10 seconds (an abrupt crash may lose that window).
+
+Startup no longer runs a full historical rewrite when reminder history is
+missing. This prevents a fresh deployment from erasing valid historical
+streaks. It does not restore streaks already overwritten; recover those from
+verified reminders and freeze history before running a manual full audit.
+
 ### 4. Discord Bot Permissions
 
 The bot requires these **Gateway Intents** (enable in the Discord Developer Portal):
@@ -162,4 +185,3 @@ The bot requires these **Gateway Intents** (enable in the Discord Developer Port
 - **Fire scaling:** 1–9 days = 🔥, 10–19 = 🔥🔥, 20–29 = 🔥🔥🔥, etc.
 
 ---
-
