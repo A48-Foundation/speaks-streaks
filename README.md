@@ -88,6 +88,21 @@ Already-corrupted leaderboard values are **not** automatically repaired.
 Migration preserves the available baseline, rather than claiming it can
 reconstruct missing speaking or freeze history.
 
+### Repairing a verified total
+
+Members with **Manage Server** permission can use
+`@Squolingo repair @debater 232` (mention the actual debater).
+This sets their current total, saves an audit record, and refreshes today's
+reminders without issuing a milestone congratulation. Existing schedules and
+today's speaking/freeze records are retained, so already-recorded speaking is
+not counted twice. Unregistered debaters are created with commitments paused
+and must set their own schedule afterward.
+
+Use a total verified for the time you run the command. For example, the supplied
+October transcript supports aanya at 232 through October 31; add any confirmed
+speaking since then and account for any missed scheduled days before applying
+that historical number.
+
 ## Tests
 
 ```text

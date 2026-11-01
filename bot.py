@@ -303,6 +303,52 @@ async def handle_action(member, action, channel, reminder_date=None):
                                f"**{person['streak']}-day** streak!")
 
 
+async def repair_total(actor, argument, channel):
+    permissions = actor.guild_permissions
+    if not (permissions.administrator or permissions.manage_guild):
+        await channel.send("Only members with Manage Server permission can repair totals.")
+        return
+    match = re.fullmatch(r"<@!?(\d+)>\s+(\d{1,7})", argument.strip())
+    if not match:
+        await channel.send("Usage: `@Squolingo repair @debater total`.")
+        return
+    user_id, total = int(match[1]), int(match[2])
+    target = actor.guild.get_member(user_id)
+    if target is None:
+        try:
+            target = await actor.guild.fetch_member(user_id)
+        except discord.NotFound:
+            await channel.send("That debater isn't in this server.")
+            return
+    if target.bot:
+        await channel.send("Bot accounts cannot have speaking streaks.")
+        return
+    async with _action_lock:
+        data = load_data()
+        today = today_pt()
+        person = data["participants"].get(str(user_id))
+        if person is None:
+            legacy_name = _legacy_match(target, data)
+            baseline = data["legacy_scores"].pop(legacy_name, {"streak": 0})
+            person = new_person(target.display_name, [], today, baseline["streak"])
+            data["participants"][str(user_id)] = person
+        else:
+            reconcile(person, today)
+        previous = person["streak"]
+        person["streak"] = total
+        data.setdefault("repairs", []).append({
+            "user_id": str(user_id), "by": str(actor.id),
+            "date": today.isoformat(), "previous": previous, "total": total,
+        })
+        data["repairs"] = data["repairs"][-100:]
+        save_data(data)
+        await persist_discord_state(channel)
+        await refresh_reminders(channel, data)
+    await channel.send(f"{target.mention} Streak repaired: **{previous} → {total}**. "
+                       "Your schedule and today's recorded actions are unchanged. "
+                       "If not registered, set your schedule to resume commitments.")
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     if _state_message is None or payload.channel_id != CHANNEL_ID or not payload.member:
@@ -343,6 +389,8 @@ async def dispatch(member, text, channel):
             "`@Squolingo freeze` - preserve today's streak without adding a day.\n"
             "`@Squolingo report scores` - show positive streaks.\n"
             "`@Squolingo test reminders` - send both reminders.\n"
+            "`@Squolingo repair @debater total` - correct a verified total "
+            "(Manage Server permission required).\n"
             "Both reminders accept 🔥 for speaking and 🧊 for a freeze. "
             "Repeat reactions count only once; reactions are kept.\n"
             "All schedules use Pacific time. Only missed scheduled days reset "
@@ -350,6 +398,8 @@ async def dispatch(member, text, channel):
             "Set your own schedule before recording speaking. "
             "Commands also work with `!`, such as `!schedule daily`."
         )
+    elif command == "repair":
+        await repair_total(member, argument, channel)
     elif command == "schedule":
         if not argument:
             person = load_data()["participants"].get(str(member.id))

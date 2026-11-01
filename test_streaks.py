@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from datetime import date
 from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 
 from streaks import new_person, parse_schedule, reconcile, record
 from test_persistence import bot
@@ -175,6 +176,47 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
             await bot.handle_action(self.member, "yes", self.channel, "2026-10-19")
         persist.assert_not_awaited()
         self.assertEqual(bot.load_data()["participants"], {})
+
+    async def test_repair_requires_manage_server_permission(self):
+        self.member.guild_permissions = SimpleNamespace(administrator=False, manage_guild=False)
+        before = bot.load_data()
+        with patch.object(bot, "persist_discord_state", AsyncMock()) as persist:
+            await bot.repair_total(self.member, "<@5> 232", self.channel)
+        self.assertEqual(bot.load_data(), before)
+        persist.assert_not_awaited()
+
+    async def test_repair_preserves_schedule_and_already_recorded_speaking(self):
+        self.member.bot = False
+        self.member.guild_permissions = SimpleNamespace(administrator=False, manage_guild=True)
+        self.member.guild = Mock(get_member=Mock(return_value=self.member))
+        data = bot.load_data()
+        person = new_person("Debater", [1, 3], date(2026, 10, 20), 5)
+        person["results"]["2026-10-20"] = "yes"
+        data["participants"]["5"] = person
+        bot.save_data(data)
+        with patch.object(bot, "persist_discord_state", AsyncMock()) as persist:
+            await bot.repair_total(self.member, "<@5> 232", self.channel)
+            await bot.handle_action(self.member, "yes", self.channel)
+        state = bot.load_data()
+        self.assertEqual(state["participants"]["5"]["streak"], 232)
+        self.assertEqual(state["participants"]["5"]["schedule"], [1, 3])
+        self.assertEqual(state["repairs"][0]["previous"], 5)
+        self.assertEqual(state["repairs"][0]["total"], 232)
+        persist.assert_awaited()
+
+    async def test_repair_claims_legacy_entry_without_guessing_schedule(self):
+        self.member.bot = False
+        self.member.guild_permissions = SimpleNamespace(administrator=True, manage_guild=True)
+        self.member.guild = Mock(get_member=Mock(return_value=self.member))
+        data = bot.load_data()
+        data["legacy_scores"]["Debater"] = {"streak": 5}
+        bot.save_data(data)
+        with patch.object(bot, "persist_discord_state", AsyncMock()):
+            await bot.repair_total(self.member, "<@5> 232", self.channel)
+        state = bot.load_data()
+        self.assertNotIn("Debater", state["legacy_scores"])
+        self.assertEqual(state["participants"]["5"]["streak"], 232)
+        self.assertEqual(state["participants"]["5"]["schedule"], [])
 
 
 if __name__ == "__main__":
