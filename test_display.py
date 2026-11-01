@@ -59,7 +59,7 @@ class DisplayTests(unittest.TestCase):
                 y = 71 + lane * 55 + 4
                 self.assertEqual(frame.getpixel((x * SCALE, y * SCALE)), (36, 68, 86))
 
-    def test_live_race_uses_today_records_hides_zero_and_pages_shared_scale(self):
+    def test_live_race_uses_today_records_hides_zero_and_stacks_all_lanes(self):
         today = date(2026, 11, 1)
         spoken = new_person("Spoken", [6], today, 500)
         spoken["results"][today.isoformat()] = "yes"
@@ -72,12 +72,25 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(len(rows), 6)
         with patch("shark_race.shark_race_gif", wraps=shark_race_gif) as render:
             images = race_attachments(data, today)
-        self.assertEqual(len(images), 2)
-        self.assertEqual([call.args[1] for call in render.call_args_list], [600, 600])
-        self.assertEqual([call.kwargs["rank_offset"] for call in render.call_args_list], [0, 5])
+        self.assertEqual(len(images), 1)
+        render.assert_called_once_with(rows, 600)
         with Image.open(io.BytesIO(images[0])) as image:
-            self.assertEqual(image.size, (1024, 760))
+            self.assertEqual(image.size, (1024, 870))
             self.assertLess(len(images[0]), 8 * 1024 * 1024)
+
+    def test_adding_debaters_extends_image_without_shrinking_existing_lanes(self):
+        today = date(2026, 11, 1)
+        data = {"participants": {}, "legacy_scores": {
+            "Leader": {"streak": 232}, "Runner": {"streak": 61},
+        }}
+        before = Image.open(io.BytesIO(race_attachments(data, today)[0])).convert("RGB")
+        data["legacy_scores"].update({f"New debater {n}": {"streak": 1} for n in range(20)})
+        after = Image.open(io.BytesIO(race_attachments(data, today)[0])).convert("RGB")
+        self.assertEqual(after.width, before.width)
+        self.assertEqual(after.height - before.height, 20 * 55 * SCALE)
+        existing_lanes = (0, 71 * SCALE, before.width, (71 + 2 * 55 - 5) * SCALE)
+        self.assertEqual(before.crop(existing_lanes).tobytes(),
+                         after.crop(existing_lanes).tobytes())
 
     def test_shark_identity_and_appearance_survive_rank_changes(self):
         original = shark_race_gif([("Debater", 100, "Spoken")])[0]

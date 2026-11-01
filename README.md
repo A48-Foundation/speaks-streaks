@@ -80,8 +80,11 @@ and schedule changes.
 
 All lanes share a scale with 10- and 50-day markers, starting at a 300-day
 finish line and extending when necessary. Sharks have no medals. Decorative
-motion never changes streak credit. Large races split into five-shark images, up to
-the top 20 debaters, so Discord does not shrink one extremely tall image.
+motion never changes streak credit. All positive-streak debaters appear in one
+fixed-width GIF. Each additional debater adds a fixed-height lane: the source
+image gets longer without shrinking existing sharks or text. There is no
+five-shark pagination or multi-image gallery. Discord may still scale its
+in-message preview; opening the attachment shows the full-resolution image.
 If rendering fails, reminders fall back to the readable text leaderboard.
 
 Reports (`@Squolingo report scores` or `!streaks`) also show the shark race.

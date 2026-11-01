@@ -28,7 +28,7 @@ def race_rows(data, today):
         rows.append((person["name"], person["streak"], status))
     rows.extend((name, person["streak"], "Scheduled")
                 for name, person in data["legacy_scores"].items())
-    return sorted((row for row in rows if row[1] > 0), key=lambda row: (-row[1], row[0]))[:20]
+    return sorted((row for row in rows if row[1] > 0), key=lambda row: (-row[1], row[0]))
 
 
 def race_attachments(data, today):
@@ -36,17 +36,14 @@ def race_attachments(data, today):
     if not rows:
         return []
     goal = max(300, (max(row[1] for row in rows) // 100 + 1) * 100)
-    images = []
-    for offset in range(0, len(rows), 5):
-        frames = shark_race_gif(rows[offset:offset + 5], goal, rank_offset=offset)
-        output = io.BytesIO()
-        frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:],
-                       duration=200, loop=0, optimize=True)
-        images.append(output.getvalue())
-    return images
+    frames = shark_race_gif(rows, goal)
+    output = io.BytesIO()
+    frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:],
+                   duration=200, loop=0, optimize=True)
+    return [output.getvalue()]
 
 
-def shark_race_gif(rows, goal=300, rank_offset=0):
+def shark_race_gif(rows, goal=300):
     """Use one shared scale; animation never changes a shark's streak position."""
     if goal <= 0 or not rows or any(streak < 0 or streak > goal for _, streak, _ in rows):
         raise ValueError("Provide racers with streaks between zero and the shared goal.")
@@ -76,10 +73,10 @@ def shark_race_gif(rows, goal=300, rank_offset=0):
             accent, kind = shark_style(name)
             draw.rectangle((12, top, 499, top + 49), fill="#102839", outline="#204457")
             clean_name = name.replace("\n", " ").replace("\r", " ")[:60]
-            name_label = f"{rank + rank_offset + 1:02}  {clean_name}"
+            name_label = f"{rank + 1:02}  {clean_name}"
             while draw.textlength(name_label, font=font) > 106:
                 clean_name = clean_name[:-1]
-                name_label = f"{rank + rank_offset + 1:02}  {clean_name}..."
+                name_label = f"{rank + 1:02}  {clean_name}..."
             draw.text((20, top + 7), name_label, font=font, fill="#e5fbff")
             draw.line((start, center + 14, finish, center + 14), fill="#2c576b")
             for mark in marks[:-1]:
