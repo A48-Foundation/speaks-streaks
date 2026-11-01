@@ -148,7 +148,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pacific time", help_text)
         self.assertIn("@Squolingo freeze", help_text)
 
-    async def test_both_reminders_have_both_reactions_and_track_date(self):
+    async def test_both_reminders_use_buttons_without_adding_reactions(self):
         messages = [Mock(add_reaction=AsyncMock(), id=10),
                     Mock(add_reaction=AsyncMock(), id=20)]
         self.channel.send.side_effect = messages
@@ -157,18 +157,19 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
             await bot.send_morning_reminder()
             await bot.send_evening_reminder()
         for message in messages:
-            self.assertEqual([call.args[0] for call in message.add_reaction.await_args_list],
-                             ["🔥", "🧊"])
+            message.add_reaction.assert_not_awaited()
         self.assertEqual(bot.load_data()["morning_messages"][0]["date"], "2026-10-20")
         for call in self.channel.send.call_args_list:
             self.assertNotIn("notion", call.args[0].lower())
+            self.assertNotIn("react with", call.args[0].lower())
+            self.assertTrue(call.kwargs["view"].is_persistent())
 
     async def test_speaking_edits_reminders_without_removing_reactions(self):
         data = bot.load_data()
         data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 9)
         data["morning_messages"] = [{"id": 10, "date": "2026-10-20"}]
         bot.save_data(data)
-        reminder = Mock(edit=AsyncMock(), remove_reaction=AsyncMock())
+        reminder = Mock(edit=AsyncMock(), remove_reaction=AsyncMock(), reactions=[])
         self.channel.fetch_message = AsyncMock(return_value=reminder)
         with patch.object(bot, "persist_discord_state", AsyncMock()):
             await bot.handle_action(self.member, "yes", self.channel)
@@ -179,34 +180,6 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         congratulations = [call for call in self.channel.send.call_args_list
                            if "Congrats" in call.args[0]]
         self.assertEqual(len(congratulations), 1)
-
-    async def test_old_reminder_reaction_cannot_backdate_speaking(self):
-        data = bot.load_data()
-        data["morning_messages"] = [{"id": 10, "date": "2026-10-19"}]
-        bot.save_data(data)
-        self.member.bot = False
-        payload = Mock(member=self.member, channel_id=bot.CHANNEL_ID,
-                       message_id=10, emoji="🔥")
-        with patch.object(bot, "bot", Mock(get_channel=Mock(return_value=self.channel))), \
-                patch.object(bot, "handle_action", AsyncMock()) as action:
-            await bot.on_raw_reaction_add(payload)
-        action.assert_not_awaited()
-
-    async def test_both_emoji_actions_route_on_either_reminder(self):
-        data = bot.load_data()
-        data["morning_messages"] = [{"id": 10, "date": "2026-10-20"}]
-        data["evening_messages"] = [{"id": 20, "date": "2026-10-20"}]
-        bot.save_data(data)
-        self.member.bot = False
-        with patch.object(bot, "bot", Mock(get_channel=Mock(return_value=self.channel))), \
-                patch.object(bot, "handle_action", AsyncMock()) as action:
-            for message_id in (10, 20):
-                for emoji, expected in (("🔥", "yes"), ("🧊", "frozen")):
-                    payload = Mock(member=self.member, channel_id=bot.CHANNEL_ID,
-                                   message_id=message_id, emoji=emoji)
-                    await bot.on_raw_reaction_add(payload)
-                    action.assert_awaited_with(self.member, expected,
-                                               self.channel, "2026-10-20")
 
     async def test_reaction_waiting_across_midnight_is_not_credited_to_new_day(self):
         with patch.object(bot, "persist_discord_state", AsyncMock()) as persist:
@@ -284,7 +257,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.add_view.call_args.args[0].is_persistent())
 
     async def test_colored_flames_reuse_existing_emoji_and_create_missing_once(self):
-        red = bot.discord.PartialEmoji(name="squolingo_fire_red", id=1)
+        red = bot.discord.PartialEmoji(name=bot.FIRE_EMOJI_PREFIX + "red", id=1)
         created = []
         async def create(name, image):
             self.assertTrue(image.startswith(b"\x89PNG"))
@@ -296,11 +269,11 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(bot.FIRE_EMOJIS, {}, clear=True), patch.object(bot, "bot", client):
             await bot.ensure_fire_emojis()
             await bot.ensure_fire_emojis()
-            self.assertEqual(len(bot.FIRE_EMOJIS), 6)
-            self.assertIn("squolingo_fire_blue", bot.FIRE_EMOJIS["blue"])
+            self.assertEqual(len(bot.FIRE_EMOJIS), 3)
+            self.assertIn(bot.FIRE_EMOJI_PREFIX + "blue", bot.FIRE_EMOJIS["blue"])
             self.assertEqual(bot.FIRE_EMOJIS["red"], str(red))
         client.fetch_application_emojis.assert_awaited_once()
-        self.assertEqual(client.create_application_emoji.await_count, 5)
+        self.assertEqual(client.create_application_emoji.await_count, 2)
 
     async def test_failed_emoji_setup_keeps_labeled_fallback_available(self):
         error = bot.discord.Forbidden(Mock(status=403, reason="Forbidden"), "Denied")
@@ -311,7 +284,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bot.flame_badge(500), "🔥 Blue fire")
             self.assertFalse(bot._fire_emojis_initialized)
 
-    async def test_spoke_button_and_fire_reaction_cannot_double_credit(self):
+    async def test_repeat_spoke_button_cannot_double_credit(self):
         data = bot.load_data()
         data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 7)
         data["morning_messages"] = [{"id": 10, "date": "2026-10-20"}]
@@ -323,9 +296,25 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot, "persist_discord_state", AsyncMock()), \
                 patch.object(bot, "refresh_reminders", AsyncMock()):
             await view.children[0].callback(interaction)
-            await bot.handle_action(self.member, "yes", self.channel, "2026-10-20")
+            await view.children[0].callback(interaction)
         self.assertEqual(bot.load_data()["participants"]["5"]["streak"], 8)
-        interaction.response.defer.assert_awaited_with(ephemeral=True)
+        self.assertEqual(interaction.response.defer.await_count, 2)
+
+    async def test_existing_reminder_reactions_are_cleared(self):
+        message = Mock(reactions=[Mock(me=True)], clear_reactions=AsyncMock())
+        await bot.clear_reminder_reactions(message)
+        message.clear_reactions.assert_awaited_once()
+
+    async def test_missing_manage_messages_removes_bot_reactions_only(self):
+        error = bot.discord.Forbidden(Mock(status=403, reason="Forbidden"), "Denied")
+        message = Mock(reactions=[Mock(me=True, emoji="🔥"), Mock(me=False, emoji="🧊")],
+                       clear_reactions=AsyncMock(side_effect=error),
+                       remove_reaction=AsyncMock())
+        client = Mock(user=Mock())
+        with patch.object(bot, "bot", client):
+            with self.assertLogs("squolingo", level="WARNING"):
+                await bot.clear_reminder_reactions(message)
+        message.remove_reaction.assert_awaited_once_with("🔥", client.user)
 
     async def test_old_reminder_button_cannot_record_today(self):
         data = bot.load_data()

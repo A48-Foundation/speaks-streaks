@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
 from streak_display import (
-    FIRE_EMOJIS, FIRE_TIERS, flame_badge, flame_png,
+    FIRE_EMOJIS, FIRE_EMOJI_PREFIX, FIRE_TIERS, flame_badge, flame_png,
     leaderboard_embed, milestone_gif, tier, week_embed,
 )
 
@@ -40,7 +40,7 @@ log = logging.getLogger("squolingo")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.reactions = True
+intents.reactions = False
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -214,7 +214,7 @@ def recover_october_totals(data, today):
 def reminder_content(data):
     return (
         f"<@&{ROLE_ID}> Did you speak today? Current Streaks:\n"
-        "Use the buttons below, or react with 🔥 to record speaking / 🧊 to freeze.\n"
+        "Use **Spoke** or **Freeze** below to update your streak.\n"
         "Need instructions? `@Squolingo help`."
     )
 
@@ -234,8 +234,6 @@ async def send_reminder(kind):
         data[key] = data[key][-14:]
         save_data(data)
         await persist_discord_state(channel)
-        await sent.add_reaction("🔥")
-        await sent.add_reaction("🧊")
 
 
 async def send_morning_reminder():
@@ -256,10 +254,34 @@ async def refresh_reminders(channel, data):
                     await message.edit(content=reminder_content(data),
                                        embed=leaderboard_embed(data, today_pt()),
                                        view=ReminderView())
+                    await clear_reminder_reactions(message)
                 except discord.NotFound:
                     continue
                 except discord.HTTPException:
                     log.exception("Could not refresh reminder.")
+
+
+async def clear_reminder_reactions(message):
+    if not message.reactions:
+        return
+    try:
+        await message.clear_reactions()
+    except discord.Forbidden:
+        for reaction in message.reactions:
+            if reaction.me:
+                await message.remove_reaction(reaction.emoji, bot.user)
+        log.warning("Manage Messages permission is needed to clear remaining user reactions.")
+
+
+async def clean_old_reminder_reactions(channel, data):
+    today = today_pt().isoformat()
+    ids = {item["id"] for key in ("morning_messages", "evening_messages")
+           for item in data[key] if item["date"] != today}
+    for message_id in ids:
+        try:
+            await clear_reminder_reactions(await channel.fetch_message(message_id))
+        except discord.HTTPException:
+            log.warning("Couldn't clear reactions on reminder %s.", message_id)
 
 
 def _legacy_match(member, data):
@@ -493,30 +515,6 @@ async def repair_total(actor, argument, channel):
                        "If not registered, set your schedule to resume commitments.")
 
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    if _state_message is None or payload.channel_id != CHANNEL_ID or not payload.member:
-        return
-    if payload.member.bot:
-        return
-    emoji = str(payload.emoji)
-    if emoji not in ("🔥", "🧊"):
-        return
-    data = load_data()
-    reminders = {item["id"]: item["date"]
-                 for key in ("morning_messages", "evening_messages")
-                 for item in data[key]}
-    if payload.message_id not in reminders:
-        return
-    channel = bot.get_channel(CHANNEL_ID)
-    if reminders[payload.message_id] != today_pt().isoformat():
-        await channel.send(f"{payload.member.mention} React to today's reminder, "
-                           "or use `!speak` / `!freeze`.")
-        return
-    await handle_action(payload.member, "yes" if emoji == "🔥" else "frozen",
-                        channel, reminders[payload.message_id])
-
-
 async def dispatch(member, text, channel):
     command, _, argument = text.strip().partition(" ")
     command = command.lower()
@@ -535,14 +533,15 @@ async def dispatch(member, text, channel):
             "`@Squolingo test reminders` - send both reminders.\n"
             "`@Squolingo repair @debater total` - correct a verified total "
             "(Manage Server permission required).\n"
-            "Both reminders accept 🔥 for speaking and 🧊 for a freeze. "
-            "Repeat reactions count only once; reactions are kept.\n"
-            "You can also use **Spoke**, **Freeze**, **My schedule**, and **My week** buttons. "
+            "Use **Spoke**, **Freeze**, **My schedule**, and **My week** buttons. "
+            "Repeated clicks count only once. Emoji reactions no longer record speaking.\n"
             "Major milestones at 50, 100, 200, 300 (and each later hundred) get animated cards.\n"
             "All schedules use Pacific time. Only missed scheduled days reset "
             "your streak, after the day ends. Unscheduled days do not change it.\n"
             "Set your own schedule before recording speaking. "
             "Commands also work with `!`, such as `!schedule daily`."
+            "\nFlame artwork: [Flaticon icon 8545117]"
+            "(https://www.flaticon.com/free-icon/flame_8545117), recolored for streak tiers."
         )
     elif command == "repair":
         await repair_total(member, argument, channel)
@@ -634,11 +633,13 @@ async def ensure_fire_emojis():
         return
     try:
         existing = {emoji.name: emoji for emoji in await bot.fetch_application_emojis()}
-        for _, key, _, color in FIRE_TIERS:
-            name = f"squolingo_fire_{key}"
+        for _, key, _, color, inner_color in FIRE_TIERS:
+            name = f"{FIRE_EMOJI_PREFIX}{key}"
             emoji = existing.get(name)
             if emoji is None:
-                emoji = await bot.create_application_emoji(name=name, image=flame_png(color))
+                image = await asyncio.to_thread(flame_png, color, inner_color)
+                emoji = await bot.create_application_emoji(name=name,
+                                                          image=image)
             FIRE_EMOJIS[key] = str(emoji)
         _fire_emojis_initialized = True
     except discord.HTTPException:
@@ -666,6 +667,7 @@ async def on_ready():
             bot.add_view(ReminderView())
             _view_registered = True
         await refresh_reminders(channel, load_data())
+        await clean_old_reminder_reactions(channel, load_data())
         if recovered:
             await refresh_reminders(channel, data)
             await channel.send(

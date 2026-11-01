@@ -15,7 +15,8 @@ LOCKED_IN_ROLE_ID=your_role_id
 
 Enable Message Content and Server Members intents in the Discord Developer
 Portal. Grant View Channel, Read Message History, Send Messages, Attach Files,
-Add Reactions, and Embed Links permissions.
+and Embed Links permissions. **Manage Messages** is optional, but required
+to remove existing user reactions from old reminders.
 
 ```text
 pip install -r requirements.txt
@@ -59,9 +60,10 @@ syntax is `@Squolingo schedule daily` or
 - A freeze preserves the streak without incrementing it. Speaking after a
   freeze increments once; repeating either action cannot grant extra credit.
 - Changes to a schedule apply today onward, never rewriting past commitments.
-- Both 9 AM and 9 PM reminders accept fire and ice-cube reactions. Reactions to
-  old reminders cannot modify historical commitments.
-- Today's reminder tables are edited after actions without removing reactions.
+- Both 9 AM and 9 PM reminders use Spoke and Freeze buttons. Emoji reactions
+  no longer modify streaks; the bot no longer adds reaction controls.
+- Today's reminder cards are edited after actions. Existing reactions are
+  cleared when permissions allow; otherwise only the bot's own are removed.
 - Congratulations are sent only when an action reaches exactly 10, 20, 30, etc.
 - Zero-streak debaters are hidden, not deleted: their schedules still exist.
 
@@ -71,8 +73,8 @@ Reminders now show a ranked Discord embed with one colored flame badge, progress
 to the next major milestone, and today's speaking/freeze status. Zero streaks
 stay hidden. Cards update after speaking, freezing, and schedule changes.
 
-Flames intensify by streak: **red 1-49**, **orange 50-99**, **gold 100-199**,
-**white-hot 200-299**, **purple 300-499**, and **blue 500+**. Rank is a plain
+Flames intensify by streak: **red 1-49**, **orange 50-99**, and **blue 100+**.
+Each uses a vibrant outer flame and contrasting inner flame. Rank is a plain
 number, not another medal. The bot generates and reuses its own application
 emojis at startup; no server emoji uploads are needed. If the emoji API is
 unavailable, a standard flame plus the color's name is shown instead.
@@ -80,7 +82,7 @@ unavailable, a standard flame plus the color's name is shown instead.
 Persistent **Spoke**, **Freeze**, **My schedule**, and **My week** buttons
 work after restarts. My schedule opens a form; My week shows a private
 seven-day completion grid. Old reminder action buttons cannot backdate credit.
-Emoji reactions and mention commands still work.
+Mention commands still work; reaction controls have been retired.
 
 Milestones at **50, 100, 200, 300**, and each later hundred get an original,
 locally generated confetti GIF card. Other ten-day milestones retain a simple
@@ -90,6 +92,11 @@ celebrations. GIF playback depends on the viewer's Discord motion settings.
 The bot needs **Embed Links** permission in addition to the permissions above.
 Use `@Squolingo test reminders` to preview both cards without granting speaking
 credit or replaying milestone celebrations.
+
+Flame silhouette: [Flaticon flame icon 8545117](https://www.flaticon.com/free-icon/flame_8545117).
+The original creator is credited through this source link and in bot help;
+the artwork is recolored for use inside this application, not offered as a
+standalone icon resource. See `assets/flame-credit.txt` for source information.
 
 ## Discord persistence and migration
 

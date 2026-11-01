@@ -64,16 +64,16 @@ class DisplayTests(unittest.TestCase):
         self.assertNotEqual(first, image.convert("RGB").tobytes())
         self.assertLess(len(animation.getvalue()), 8 * 1024 * 1024)
 
-    def test_single_flame_badge_red_standard_and_blue_at_500(self):
+    def test_single_flame_badge_red_standard_and_blue_at_100(self):
         data = {"participants": {}, "legacy_scores": {
-            "Standard": {"streak": 15}, "Highest": {"streak": 500},
-            "Almost": {"streak": 499},
+            "Standard": {"streak": 15}, "Highest": {"streak": 100},
+            "Almost": {"streak": 99},
         }}
         with patch.dict(FIRE_EMOJIS, {"red": "<:red_fire:1>", "blue": "<:blue_fire:2>",
-                                     "purple": "<:purple_fire:3>"}):
+                                     "orange": "<:orange_fire:3>"}):
             embed = leaderboard_embed(data, date(2026, 11, 1))
         self.assertIn("<:blue_fire:2>", embed.fields[0].name)
-        self.assertIn("<:purple_fire:3>", embed.fields[1].name)
+        self.assertIn("<:orange_fire:3>", embed.fields[1].name)
         self.assertIn("<:red_fire:1>", embed.fields[2].name)
         for field in embed.fields:
             self.assertEqual(field.name.count("<:"), 1)
@@ -82,11 +82,17 @@ class DisplayTests(unittest.TestCase):
             self.assertNotIn(medal, str(embed.to_dict()))
 
     def test_generated_red_and_blue_flames_are_distinct_transparent_pngs(self):
-        red = Image.open(io.BytesIO(flame_png(0xEF4444)))
-        blue = Image.open(io.BytesIO(flame_png(0x3B82F6)))
+        red = Image.open(io.BytesIO(flame_png(0xFF1744, 0xFF8A00)))
+        blue = Image.open(io.BytesIO(flame_png(0x2563EB, 0x22D3EE)))
         self.assertEqual(red.mode, "RGBA")
         self.assertEqual(red.getpixel((0, 0))[3], 0)
         self.assertNotEqual(red.tobytes(), blue.tobytes())
+        for image, outer, inner in ((red, (255, 23, 68), (255, 138, 0)),
+                                    (blue, (37, 99, 235), (34, 211, 238))):
+            colors = {color[:3] for count, color in image.getcolors(128 * 128)
+                      if color[3] == 255 and count > 100}
+            self.assertIn(outer, colors)
+            self.assertIn(inner, colors)
 
 
 if __name__ == "__main__":

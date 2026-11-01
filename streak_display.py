@@ -1,6 +1,7 @@
 """Native Discord cards and locally generated milestone animations."""
 
 import io
+import os
 import random
 from datetime import timedelta
 
@@ -10,14 +11,12 @@ from PIL import Image, ImageDraw, ImageFont
 from streaks import DAYS
 
 FIRE_TIERS = (
-    (500, "blue", "Blue fire", 0x3B82F6),
-    (300, "purple", "Purple fire", 0xA855F7),
-    (200, "white_hot", "White-hot fire", 0xF8FAFC),
-    (100, "gold", "Gold fire", 0xFBBF24),
-    (50, "orange", "Orange fire", 0xFB923C),
-    (0, "red", "Red fire", 0xEF4444),
+    (100, "blue", "Blue fire", 0x2563EB, 0x22D3EE),
+    (50, "orange", "Orange fire", 0xFF6B00, 0xFFD000),
+    (0, "red", "Red fire", 0xFF1744, 0xFF8A00),
 )
 FIRE_EMOJIS = {}
+FIRE_EMOJI_PREFIX = "squolingo_fire_v2_"
 
 
 def next_milestone(streak):
@@ -29,52 +28,31 @@ def fire_tier(streak):
 
 
 def tier(streak):
-    _, _, label, color = fire_tier(streak)
+    _, _, label, color, _ = fire_tier(streak)
     return label, color
 
 
 def flame_badge(streak):
-    _, key, label, _ = fire_tier(streak)
+    _, key, label, _, _ = fire_tier(streak)
     # The label keeps tiers distinguishable if emoji upload is unavailable.
     return FIRE_EMOJIS.get(key, f"🔥 {label}")
 
 
-def flame_png(color):
-    """Draw a transparent, antialiased flame for an application emoji."""
-    def curve(start, control1, control2, end):
-        points = []
-        for step in range(21):
-            t = step / 20
-            points.append(tuple(4 * ((1 - t) ** 3 * start[axis]
-                                    + 3 * (1 - t) ** 2 * t * control1[axis]
-                                    + 3 * (1 - t) * t ** 2 * control2[axis]
-                                    + t ** 3 * end[axis]) for axis in (0, 1)))
-        return points
-
-    outer = []
-    for segment in (
-        ((68, 7), (78, 38), (110, 45), (110, 80)),
-        ((110, 80), (110, 107), (88, 124), (64, 124)),
-        ((64, 124), (39, 124), (17, 104), (18, 82)),
-        ((18, 82), (19, 66), (33, 53), (39, 42)),
-        ((39, 42), (38, 62), (47, 70), (51, 72)),
-        ((51, 72), (58, 52), (49, 31), (68, 7)),
-    ):
-        outer.extend(curve(*segment))
-    accent = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
-    image = Image.new("RGBA", (512, 512))
-    draw = ImageDraw.Draw(image)
-    draw.polygon(outer, fill=accent + (255,))
-    inner = []
-    for segment in (
-        ((65, 65), (73, 83), (89, 88), (87, 104)),
-        ((87, 104), (85, 119), (43, 124), (42, 102)),
-        ((42, 102), (41, 89), (53, 85), (55, 79)),
-        ((55, 79), (53, 89), (62, 93), (65, 65)),
-    ):
-        inner.extend(curve(*segment))
-    core = tuple(int(channel + (255 - channel) * 0.75) for channel in accent)
-    draw.polygon(inner, fill=core + (255,))
+def flame_png(color, inner_color):
+    """Recolor the supplied Flaticon silhouette, retaining its transparency."""
+    path = os.path.join(os.path.dirname(__file__), "assets", "flame.png")
+    with Image.open(path) as source:
+        image = source.convert("RGBA")
+    original_outer, original_inner = (242, 104, 34), (247, 178, 25)
+    outer = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
+    inner = ((inner_color >> 16) & 255, (inner_color >> 8) & 255, inner_color & 255)
+    pixels = []
+    for r, g, b, alpha in getattr(image, "get_flattened_data", image.getdata)():
+        rgb = (r, g, b)
+        outer_distance = sum((a - b) ** 2 for a, b in zip(rgb, original_outer))
+        inner_distance = sum((a - b) ** 2 for a, b in zip(rgb, original_inner))
+        pixels.append((inner if inner_distance < outer_distance else outer) + (alpha,))
+    image.putdata(pixels)
     image = image.resize((128, 128), Image.Resampling.LANCZOS)
     output = io.BytesIO()
     image.save(output, format="PNG")
