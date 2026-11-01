@@ -1,129 +1,143 @@
-"""sQuolingo Speaks Streaks — Discord Bot.
+"""Discord-only speaking streaks with self-service schedules."""
 
-Sends morning/evening reminders, handles 🔥 (spoke) and 🧊 (freeze) reactions,
-and keeps Notion streak data in sync.
-"""
-
-import os
-import json
-import logging
 import asyncio
 import io
-from datetime import datetime, time, date, timedelta
+import json
+import logging
+import os
+import re
+from datetime import datetime, time
+from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-import notion_client as notion
+from streaks import DAYS, new_person, parse_schedule, reconcile, record
 
 load_dotenv()
-
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 CHANNEL_ID = int(os.environ["CHANNEL_ID"])
 ROLE_ID = int(os.environ["LOCKED_IN_ROLE_ID"])
-NOTION_LINK = os.environ["NOTION_LINK"]
-
 PT = ZoneInfo("America/Los_Angeles")
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-BOT_DATA_FILE = os.path.join(APP_DIR, "bot_data.json")
-FROZEN_DATES_FILE = os.path.join(APP_DIR, "frozen_dates.json")
 STATE_MARKER = "Squolingo persistent state v1 - do not delete."
 _state = None
 _state_message = None
 _state_revision = 0
 _saved_revision = -1
 _state_lock = asyncio.Lock()
+_action_lock = asyncio.Lock()
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("squolingo")
-
-# ─── Discord setup ────────────────────────────────────────────────────────────
-
 intents = discord.Intents.default()
 intents.message_content = True
-intents.reactions = True
 intents.members = True
-
+intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ─── Persistent data ─────────────────────────────────────────────────────────
-
-def load_data() -> dict:
-    if _state is not None:
-        return json.loads(json.dumps(_state))
-    try:
-        with open(BOT_DATA_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return _default_data()
+def today_pt():
+    return datetime.now(PT).date()
 
 
-def _default_data() -> dict:
+def _default_data():
     return {
-        "freeze_counts": {},
-        "frozen_dates": {},
-        "last_milestones": {},
-        "morning_messages": [],
-        "evening_messages": [],
-        "last_page_statuses": {},
-        "name_cache": {},
+        "version": 2, "participants": {}, "legacy_scores": {},
+        "frozen_dates": {}, "name_cache": {},
+        "morning_messages": [], "evening_messages": [],
     }
 
 
-def save_data(data: dict):
+def load_data():
+    return json.loads(json.dumps(_state if _state is not None else _default_data()))
+
+
+def save_data(data):
     global _state, _state_revision
     _state = json.loads(json.dumps(data))
     _state_revision += 1
 
 
-def load_frozen_dates() -> dict[str, set[str]]:
-    """Read Discord-backed freeze history, or legacy files during migration."""
-    if _state is not None:
-        return {k: set(v) for k, v in _state.get("frozen_dates", {}).items()}
-    frozen = {}
-    for path in [FROZEN_DATES_FILE]:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except FileNotFoundError:
-            continue
-        for name, dates in raw.items():
-            frozen.setdefault(name, set()).update(dates)
-    for name, dates in load_data().get("frozen_dates", {}).items():
-        frozen.setdefault(name, set()).update(dates)
-    return frozen
+def load_frozen_dates():
+    return {k: set(v) for k, v in load_data().get("frozen_dates", {}).items()}
 
 
-def save_frozen_dates(frozen_map: dict[str, set[str]]):
-    """Update freeze history in the Discord-backed state."""
+def save_frozen_dates(frozen_map):
     data = load_data()
     data["frozen_dates"] = {k: sorted(v) for k, v in frozen_map.items()}
     save_data(data)
 
 
+def _read_legacy_table(content):
+    if "Current Streaks:" not in content:
+        return {}
+    scores = {}
+    for line in content.splitlines():
+        match = re.fullmatch(r"\s*(.+?)\s+(\d+)\s*", line)
+        if match:
+            name = match[1].replace("🔥", "").strip()
+            if name and name != "Debater":
+                scores[name] = int(match[2])
+    return scores
+
+
+def _validate_state(data):
+    if not isinstance(data, dict) or not isinstance(data.get("frozen_dates"), dict):
+        raise ValueError("Invalid Discord state; refusing to reset it.")
+    if data.get("version") not in (None, 1, 2):
+        raise ValueError("Unsupported Discord state version.")
+    if data.get("version") == 2:
+        if not isinstance(data.get("participants"), dict):
+            raise ValueError("Invalid participants.")
+        for person in data["participants"].values():
+            if not isinstance(person["streak"], int) or person["streak"] < 0:
+                raise ValueError("Invalid streak.")
+            if any(day not in range(7) for day in person["schedule"]):
+                raise ValueError("Invalid schedule.")
+            datetime.fromisoformat(person["processed_through"])
+            if not isinstance(person["results"], dict):
+                raise ValueError("Invalid speaking history.")
+
+
 async def restore_discord_state(channel):
     global _state_message, _state, _state_revision, _saved_revision
+    legacy = None
+    scores = None
+    score_day = None
+    today = today_pt()
     async for message in channel.history(limit=None):
-        if message.author.id == bot.user.id and message.content == STATE_MARKER:
+        if message.author.id != bot.user.id:
+            continue
+        if message.content == STATE_MARKER:
             if len(message.attachments) != 1:
                 raise ValueError("Discord state attachment is missing.")
             data = json.loads(await message.attachments[0].read())
-            if not isinstance(data, dict) or not isinstance(data.get("frozen_dates"), dict):
-                raise ValueError("Invalid Discord state; refusing to reset it.")
-            _state = data
+            _validate_state(data)
             _state_message = message
-            _state_revision = 0
-            _saved_revision = 0
-            return
-    # Only the first migration reads local seed/runtime files.
-    frozen = load_frozen_dates()
-    data = load_data()
-    data["frozen_dates"] = {k: sorted(v) for k, v in frozen.items()}
+            if data.get("version") == 2:
+                _state = data
+                _state_revision = _saved_revision = 0
+                return
+            legacy = data
+        # Use a completed day's leaderboard as the migration baseline.
+        day = message.created_at.astimezone(PT).date()
+        if scores is None and day < today:
+            table = _read_legacy_table(message.content)
+            if table:
+                scores, score_day = table, day
+        if legacy is not None and scores is not None:
+            break
+    data = _default_data()
+    if legacy:
+        for key in ("frozen_dates", "name_cache", "morning_messages", "evening_messages"):
+            data[key] = legacy.get(key, data[key])
+        data["legacy_freeze_counts"] = legacy.get("freeze_counts", {})
+    data["legacy_scores"] = {
+        name: {"streak": value, "date": score_day.isoformat()}
+        for name, value in (scores or {}).items()
+    }
     save_data(data)
     await persist_discord_state(channel)
 
@@ -135,7 +149,7 @@ async def persist_discord_state(channel=None):
             return
         channel = channel or bot.get_channel(CHANNEL_ID)
         if channel is None:
-            raise RuntimeError("Cannot persist state: Discord channel unavailable.")
+            raise RuntimeError("Discord state channel unavailable.")
         revision = _state_revision
         payload = json.dumps(_state, ensure_ascii=True).encode("utf-8")
         attachment = discord.File(io.BytesIO(payload), filename="squolingo-state.json")
@@ -149,6 +163,267 @@ async def persist_discord_state(channel=None):
         _saved_revision = revision
 
 
+def _reconcile_all(data, today):
+    for person in data["participants"].values():
+        reconcile(person, today)
+
+
+def format_leaderboard(data):
+    rows = [(p["name"], p["streak"]) for p in data["participants"].values()]
+    rows.extend((name, p["streak"]) for name, p in data["legacy_scores"].items())
+    rows = sorted((row for row in rows if row[1] > 0), key=lambda row: (-row[1], row[0]))
+    if not rows:
+        return "No active streaks yet. Set your schedule with `!schedule daily`."
+    lines = ["```", f"{'Debater':<40} Streak", "━" * 48]
+    for index, (name, streak) in enumerate(rows):
+        label = re.sub(r"[`\r\n]", "", name)[:32]
+        label += " " + "🔥" * min(streak // 10 + 1, 24)
+        line = f"{label:<40} {streak}"
+        if len("\n".join(lines + [line])) > 1600:
+            lines.append(f"... {len(rows) - index} more active streaks")
+            break
+        lines.append(line)
+    return "\n".join(lines + ["```"])
+
+
+def reminder_content(data):
+    return (
+        f"<@&{ROLE_ID}> Did you speak today? Current Streaks:\n"
+        f"{format_leaderboard(data)}\n"
+        "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.\n"
+        "Set your schedule: `!schedule daily` or `!schedule mon wed fri`."
+    )
+
+
+async def send_reminder(kind):
+    async with _action_lock:
+        channel = bot.get_channel(CHANNEL_ID)
+        data = load_data()
+        today = today_pt()
+        _reconcile_all(data, today)
+        save_data(data)
+        await persist_discord_state(channel)
+        sent = await channel.send(reminder_content(data))
+        key = f"{kind}_messages"
+        data[key].append({"id": sent.id, "date": today.isoformat()})
+        data[key] = data[key][-14:]
+        save_data(data)
+        await persist_discord_state(channel)
+        await sent.add_reaction("🔥")
+        await sent.add_reaction("🧊")
+
+
+async def send_morning_reminder():
+    await send_reminder("morning")
+
+
+async def send_evening_reminder():
+    await send_reminder("evening")
+
+
+async def refresh_reminders(channel, data):
+    today = today_pt().isoformat()
+    for key in ("morning_messages", "evening_messages"):
+        for item in data[key]:
+            if item["date"] == today:
+                try:
+                    message = await channel.fetch_message(item["id"])
+                    await message.edit(content=reminder_content(data))
+                except discord.NotFound:
+                    continue
+                except discord.HTTPException:
+                    log.exception("Could not refresh reminder.")
+
+
+def _legacy_match(member, data):
+    names = data["legacy_scores"]
+    cached = data.get("name_cache", {}).get(member.display_name)
+    if cached in names:
+        return cached
+    display = member.display_name.casefold()
+    ranked = []
+    for name in names:
+        value = name.casefold()
+        score = 1 if value == display else (
+            0.9 if value in display or display in value
+            else SequenceMatcher(None, display, value).ratio()
+        )
+        ranked.append((score, name))
+    ranked.sort(reverse=True)
+    if ranked and ranked[0][0] >= 0.8:
+        if len(ranked) == 1 or ranked[0][0] > ranked[1][0]:
+            return ranked[0][1]
+    return None
+
+
+async def set_schedule(member, text, channel):
+    days = parse_schedule(text)
+    async with _action_lock:
+        data = load_data()
+        today = today_pt()
+        person = data["participants"].get(str(member.id))
+        if person is None:
+            legacy_name = _legacy_match(member, data)
+            baseline = data["legacy_scores"].pop(legacy_name, {"streak": 0})
+            freeze_count = data.get("legacy_freeze_counts", {}).get(legacy_name, 0)
+            person = new_person(member.display_name, days, today,
+                                baseline["streak"], freeze_count)
+            data["participants"][str(member.id)] = person
+        else:
+            reconcile(person, today)
+            person["schedule"] = days
+            person["name"] = member.display_name
+        save_data(data)
+        await persist_discord_state(channel)
+    label = ", ".join(DAYS[day].title() for day in days) if days else "off (paused)"
+    await channel.send(f"{member.mention} Schedule: **{label}** (Pacific time). "
+                       f"Streak: **{person['streak']}**.")
+
+
+async def handle_action(member, action, channel, reminder_date=None):
+    async with _action_lock:
+        today = today_pt()
+        if reminder_date is not None and reminder_date != today.isoformat():
+            await channel.send(f"{member.mention} That reminder's Pacific day has ended.")
+            return
+        data = load_data()
+        person = data["participants"].get(str(member.id))
+        if person is None:
+            await channel.send(f"{member.mention} Set your schedule first: "
+                               "`!schedule daily` or `!schedule mon wed fri`.")
+            return
+        person["name"] = member.display_name
+        text, milestone = record(person, today, action)
+        save_data(data)
+        await persist_discord_state(channel)
+        await refresh_reminders(channel, data)
+        await channel.send(f"{member.mention} {text}")
+        if milestone:
+            await channel.send(f"🎉 Congrats to {member.mention} for hitting a "
+                               f"**{person['streak']}-day** streak!")
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if _state_message is None or payload.channel_id != CHANNEL_ID or not payload.member:
+        return
+    if payload.member.bot:
+        return
+    emoji = str(payload.emoji)
+    if emoji not in ("🔥", "🧊"):
+        return
+    data = load_data()
+    reminders = {item["id"]: item["date"]
+                 for key in ("morning_messages", "evening_messages")
+                 for item in data[key]}
+    if payload.message_id not in reminders:
+        return
+    channel = bot.get_channel(CHANNEL_ID)
+    if reminders[payload.message_id] != today_pt().isoformat():
+        await channel.send(f"{payload.member.mention} React to today's reminder, "
+                           "or use `!speak` / `!freeze`.")
+        return
+    await handle_action(payload.member, "yes" if emoji == "🔥" else "frozen",
+                        channel, reminders[payload.message_id])
+
+
+async def dispatch(member, text, channel):
+    command, _, argument = text.strip().partition(" ")
+    command = command.lower()
+    if command == "help":
+        await channel.send(
+            "**Squolingo help**\n"
+            "Mention me in this channel to use these commands:\n"
+            "`@Squolingo schedule daily` - speak every day.\n"
+            "`@Squolingo schedule mon, wed, fri` - choose any combination of "
+            "`mon, tue, wed, thu, fri, sat, sun`.\n"
+            "`@Squolingo schedule` - view your schedule.\n"
+            "`@Squolingo schedule off` - pause without deleting your streak.\n"
+            "`@Squolingo speak` - record speaking today.\n"
+            "`@Squolingo freeze` - preserve today's streak without adding a day.\n"
+            "`@Squolingo report scores` - show positive streaks.\n"
+            "`@Squolingo test reminders` - send both reminders.\n"
+            "Both reminders accept 🔥 for speaking and 🧊 for a freeze. "
+            "Repeat reactions count only once; reactions are kept.\n"
+            "All schedules use Pacific time. Only missed scheduled days reset "
+            "your streak, after the day ends. Unscheduled days do not change it.\n"
+            "Set your own schedule before recording speaking. "
+            "Commands also work with `!`, such as `!schedule daily`."
+        )
+    elif command == "schedule":
+        if not argument:
+            person = load_data()["participants"].get(str(member.id))
+            label = ", ".join(DAYS[d].title() for d in person["schedule"]) if person else "not set"
+            await channel.send(f"{member.mention} Schedule: {label or 'off'}. "
+                               "Use `!schedule daily`, `!schedule mon wed fri`, or `!schedule off`.")
+        else:
+            try:
+                await set_schedule(member, argument, channel)
+            except ValueError as error:
+                await channel.send(str(error))
+    elif command in ("speak", "freeze"):
+        await handle_action(member, "yes" if command == "speak" else "frozen", channel)
+    elif command == "streaks" or text.lower() in ("report scores", "report streaks",
+                                                "check streak calculations"):
+        async with _action_lock:
+            data = load_data()
+            _reconcile_all(data, today_pt())
+            save_data(data)
+            await persist_discord_state(channel)
+            await channel.send("Current Streaks:\n" + format_leaderboard(data))
+    elif text.lower() == "test reminders":
+        await send_morning_reminder()
+        await send_evening_reminder()
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not message.guild or message.channel.id != CHANNEL_ID:
+        return
+    if _state_message is None:
+        return
+    content = message.content.strip()
+    if content.startswith("!"):
+        await dispatch(message.author, content[1:], message.channel)
+    elif bot.user and bot.user.mentioned_in(message) and not message.mention_everyone:
+        content = re.sub(rf"<@!?{bot.user.id}>", "", content).strip()
+        await dispatch(message.author, content, message.channel)
+
+
+@tasks.loop(time=time(hour=9, tzinfo=PT))
+async def morning_task():
+    try:
+        await send_morning_reminder()
+    except Exception:
+        log.exception("Morning reminder failed.")
+
+
+@tasks.loop(time=time(hour=21, tzinfo=PT))
+async def evening_task():
+    try:
+        await send_evening_reminder()
+    except Exception:
+        log.exception("Evening reminder failed.")
+
+
+@tasks.loop(time=time(hour=0, minute=30, tzinfo=PT))
+async def midnight_task():
+    await reconcile_task()
+
+
+@tasks.loop(minutes=2)
+async def reconcile_task():
+    try:
+        async with _action_lock:
+            data = load_data()
+            _reconcile_all(data, today_pt())
+            if data != load_data():
+                save_data(data)
+            await persist_discord_state()
+    except Exception:
+        log.exception("Scheduled-day reconciliation failed; will retry.")
+
+
 @tasks.loop(seconds=10)
 async def persist_state_task():
     try:
@@ -157,974 +432,34 @@ async def persist_state_task():
         log.exception("Failed saving state to Discord; will retry.")
 
 
-# ─── Streak computation ──────────────────────────────────────────────────────
-
-def _group_by_assignee(pages: list) -> dict[str, list]:
-    """Group pages by assignee name."""
-    groups: dict[str, list] = {}
-    for page in pages:
-        for name in notion.get_assignee_names(page):
-            groups.setdefault(name, []).append(page)
-    return groups
-
-
-def _deduplicate_pages(pages: list) -> list:
-    """Remove duplicate pages for the same date, keeping the one with highest streak.
-
-    If multiple pages share the same due date, this keeps only the most
-    authoritative one (highest streak value, or earliest creation time as tiebreaker).
-    """
-    by_date: dict[str, list] = {}
-    for page in pages:
-        d = notion.get_due_date(page).date().isoformat()
-        by_date.setdefault(d, []).append(page)
-
-    deduped = []
-    for date_str, date_pages in by_date.items():
-        if len(date_pages) == 1:
-            deduped.append(date_pages[0])
-        else:
-            # Prefer highest streak; tiebreak by earliest created_time
-            best = max(
-                date_pages,
-                key=lambda p: (
-                    notion.get_streak(p),
-                    -(notion.parse_datetime(p.get("created_time", "")).timestamp()),
-                ),
-            )
-            deduped.append(best)
-    return deduped
-
-
-def compute_streaks(frozen_dates_map: dict | None = None):
-    """Efficient streak computation — reads stored Streak values from recent pages.
-
-    Fetches only the last 14 days of pages so cost does not grow with DB size.
-    Relies on process_previous_day() and the 🔥 handler keeping stored values
-    accurate.
-    """
-    if frozen_dates_map is None:
-        frozen_dates_map = {}
-
-    today = datetime.now(PT).date()
-    since = today - timedelta(days=14)
-    recent_pages = notion.get_recent_pages(since)
-
-    assignee_pages = _group_by_assignee(recent_pages)
-
-    streaks = {}
-    most_recent_pages = {}
-
-    for assignee, page_list in assignee_pages.items():
-        deduped = _deduplicate_pages(page_list)
-        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
-        most_recent = sorted_pages[0]
-        most_recent_date = notion.get_due_date(most_recent).date()
-        most_recent_pages[assignee] = most_recent
-        frozen = frozen_dates_map.get(assignee, set())
-
-        if most_recent_date == today:
-            if notion.get_status(most_recent) == "yes":
-                # Today marked Yes — stored streak should already be correct
-                streaks[assignee] = notion.get_streak(most_recent)
-            else:
-                # Today not done yet — carry previous page's streak
-                if len(sorted_pages) > 1:
-                    prev = sorted_pages[1]
-                    prev_status = notion.get_status(prev)
-                    prev_date = notion.get_due_date(prev).date()
-                    if prev_status == "yes":
-                        streaks[assignee] = notion.get_streak(prev)
-                    elif prev_date.isoformat() in frozen:
-                        streaks[assignee] = notion.get_streak(prev)
-                    else:
-                        streaks[assignee] = 0
-                else:
-                    streaks[assignee] = 0
-        else:
-            # Most recent page is a past day
-            if notion.get_status(most_recent) == "yes":
-                streaks[assignee] = notion.get_streak(most_recent)
-            elif most_recent_date.isoformat() in frozen:
-                streaks[assignee] = notion.get_streak(most_recent)
-            else:
-                streaks[assignee] = 0
-
-    return streaks, most_recent_pages
-
-
-def audit_streaks(frozen_dates_map: dict | None = None):
-    """Full streak audit — walks every page from scratch.
-
-    Fetches ALL pages. Use only for manual verification via the check command.
-    """
-    if frozen_dates_map is None:
-        frozen_dates_map = {}
-
-    pages = notion.get_all_pages()
-    today = datetime.now(PT).date()
-
-    assignee_pages = _group_by_assignee(pages)
-
-    streaks = {}
-    most_recent_pages = {}
-
-    for assignee, page_list in assignee_pages.items():
-        deduped = _deduplicate_pages(page_list)
-        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
-        frozen = frozen_dates_map.get(assignee, set())
-
-        streak = 0
-        for page in sorted_pages:
-            page_date = notion.get_due_date(page).date()
-            status = notion.get_status(page)
-
-            if page_date == today:
-                if status == "yes":
-                    streak += 1
-                else:
-                    continue  # Grace period for current day
-            else:
-                if status == "yes":
-                    streak += 1
-                elif page_date.isoformat() in frozen:
-                    continue  # Frozen day — streak maintained, not incremented
-                else:
-                    break
-
-        streaks[assignee] = streak
-        most_recent_pages[assignee] = sorted_pages[0] if sorted_pages else None
-
-    return streaks, most_recent_pages
-
-
-def process_previous_day(frozen_dates_map: dict | None = None):
-    """Sync yesterday's Streak values on Notion pages.
-
-    Called at the start of each morning reminder (and on startup) to ensure
-    stored Streak properties are correct before the leaderboard is displayed.
-    """
-    if frozen_dates_map is None:
-        frozen_dates_map = {}
-
-    today = datetime.now(PT).date()
-    yesterday = today - timedelta(days=1)
-    since = today - timedelta(days=14)
-    recent_pages = notion.get_recent_pages(since)
-
-    assignee_pages = _group_by_assignee(recent_pages)
-
-    for assignee, page_list in assignee_pages.items():
-        deduped = _deduplicate_pages(page_list)
-        sorted_pages = sorted(deduped, key=notion.get_due_date, reverse=True)
-        frozen = frozen_dates_map.get(assignee, set())
-        yesterday_page = None
-        prev_page = None
-        for i, page in enumerate(sorted_pages):
-            page_date = notion.get_due_date(page).date()
-            if page_date >= today:
-                continue
-            if page_date == yesterday:
-                yesterday_page = page
-                for j in range(i + 1, len(sorted_pages)):
-                    prev_page = sorted_pages[j]
-                    break
-                break
-            else:
-                break  # No yesterday page for this debater
-
-        if not yesterday_page:
-            continue
-
-        prev_streak = notion.get_streak(prev_page) if prev_page else 0
-        status = notion.get_status(yesterday_page)
-
-        if status == "yes":
-            expected = prev_streak + 1
-        elif yesterday.isoformat() in frozen:
-            expected = prev_streak
-        else:
-            expected = 0
-
-        current = notion.get_streak(yesterday_page)
-        if current != expected:
-            try:
-                notion.update_page_streak(yesterday_page["id"], expected)
-                log.info("Synced %s streak: %d → %d", assignee, current, expected)
-            except Exception as e:
-                log.error("Failed to sync streak for %s: %s", assignee, e)
-
-
-def sync_all_streaks(frozen_dates_map: dict | None = None) -> int:
-    """Full sync — walks ALL pages chronologically and fixes stored Streak values.
-
-    Used for initial setup and manual audit corrections.  Returns the number
-    of pages that were corrected.
-    """
-    if frozen_dates_map is None:
-        frozen_dates_map = {}
-
-    pages = notion.get_all_pages()
-    today = datetime.now(PT).date()
-
-    assignee_pages = _group_by_assignee(pages)
-    fixed = 0
-
-    for assignee, page_list in assignee_pages.items():
-        deduped = _deduplicate_pages(page_list)
-        sorted_pages = sorted(deduped, key=notion.get_due_date)  # oldest first
-        frozen = frozen_dates_map.get(assignee, set())
-
-        prev_streak = 0
-        for page in sorted_pages:
-            page_date = notion.get_due_date(page).date()
-            status = notion.get_status(page)
-
-            if page_date == today:
-                if status == "yes":
-                    expected = prev_streak + 1
-                else:
-                    continue  # Skip today's incomplete pages
-            else:
-                if status == "yes":
-                    expected = prev_streak + 1
-                elif page_date.isoformat() in frozen:
-                    expected = prev_streak
-                else:
-                    expected = 0
-
-            current = notion.get_streak(page)
-            if current != expected:
-                try:
-                    notion.update_page_streak(page["id"], expected)
-                    fixed += 1
-                except Exception as e:
-                    log.error("Sync fix failed for %s on %s: %s", assignee, page_date, e)
-
-            prev_streak = expected
-
-    return fixed
-
-
-# ─── Display helpers ──────────────────────────────────────────────────────────
-
-def fire_emojis(streak: int) -> str:
-    """Return fire emoji string scaled by 10-day milestones.
-
-    0       → ""
-    1–9     → " 🔥"
-    10–19   → " 🔥🔥"
-    20–29   → " 🔥🔥🔥"   etc.
-    """
-    if streak <= 0:
-        return ""
-    count = (streak // 10) + 1
-    return " " + "🔥" * count
-
-
-def format_leaderboard(streaks: dict) -> str:
-    """Build a Discord-friendly monospace leaderboard."""
-    names = sorted(streaks.keys(), key=lambda n: streaks[n], reverse=True)
-
-    # Calculate column width based on longest display entry
-    max_visual = 0
-    for name in names:
-        emoji_count = (streaks[name] // 10) + 1 if streaks[name] > 0 else 0
-        visual = len(name) + (1 + 2 * emoji_count if emoji_count > 0 else 0)
-        max_visual = max(max_visual, visual)
-
-    col_total = max(max_visual + 2 + 6, 32)  # min width 32
-
-    lines = ["```"]
-    header_pad = col_total - len("Debater") - len("Streak")
-    lines.append("Debater" + " " * header_pad + "Streak")
-    lines.append("━" * col_total)
-
-    for name in names:
-        s = streaks[name]
-        emojis = fire_emojis(s)
-        prefix = name + emojis
-        num_str = str(s)
-        emoji_count = (s // 10) + 1 if s > 0 else 0
-        prefix_visual = len(name) + (1 + 2 * emoji_count if emoji_count > 0 else 0)
-        pad = col_total - prefix_visual - len(num_str)
-        lines.append(prefix + " " * max(pad, 1) + num_str)
-
-    lines.append("```")
-    return "\n".join(lines)
-
-
-def get_milestone_shoutouts(streaks: dict) -> list[str]:
-    """Return shoutout strings for debaters who hit exactly 10, 20, 30… today."""
-    data = load_data()
-    last_milestones = data.get("last_milestones", {})
-    shoutouts = []
-
-    for name, streak in streaks.items():
-        if streak == 0:
-            last_milestones.pop(name, None)
-            continue
-
-        # Only celebrate on the exact day the milestone is reached
-        if streak % 10 == 0 and streak >= 10:
-            last = last_milestones.get(name, 0)
-            if streak > last:
-                shoutouts.append(
-                    f"🎉 Congrats to **{name}** for hitting a "
-                    f"**{streak}-day** streak!"
-                )
-                last_milestones[name] = streak
-
-    data["last_milestones"] = last_milestones
-    save_data(data)
-    return shoutouts
-
-
-# ─── Name matching ────────────────────────────────────────────────────────────
-
-def _fuzzy_score(discord_name: str, notion_name: str) -> float:
-    """Score how well a Discord display name matches a Notion assignee name.
-
-    Returns a value between 0 and 1.  Higher is better.
-    Handles cases like "Caine(Neo Cai)" matching "Neo Cai".
-    """
-    d = discord_name.lower()
-    n = notion_name.lower()
-
-    # Exact match
-    if d == n:
-        return 1.0
-
-    # One contains the other
-    if n in d or d in n:
-        return 0.9
-
-    # Check if all parts of the Notion name appear in the Discord name
-    n_parts = n.split()
-    if n_parts and all(part in d for part in n_parts):
-        return 0.85
-
-    # Check if all parts of the Discord name appear in the Notion name
-    # (strip common parenthetical / bracket wrappers first)
-    import re
-    d_clean = re.sub(r"[(){}\[\]|/\\,]", " ", d)
-    d_parts = [p for p in d_clean.split() if len(p) > 1]
-    if d_parts and all(part in n for part in d_parts):
-        return 0.8
-
-    # Partial overlap: count how many words match
-    d_words = set(d_clean.split())
-    n_words = set(n.split())
-    overlap = d_words & n_words
-    if overlap:
-        return 0.5 * len(overlap) / max(len(d_words), len(n_words))
-
-    return 0.0
-
-
-def match_display_name(display_name: str, assignee_names) -> str | None:
-    """Match a Discord display name to a Notion assignee.
-
-    1. Check the persistent cache first (instant).
-    2. Try exact case-insensitive match.
-    3. Fall back to fuzzy matching (score ≥ 0.6).
-    4. Cache the result so future lookups are free.
-    """
-    data = load_data()
-    cache = data.get("name_cache", {})
-
-    # Cache hit
-    if display_name in cache:
-        cached = cache[display_name]
-        # Verify the cached name still exists in the current assignee list
-        if cached in assignee_names:
-            return cached
-
-    lower = display_name.lower()
-
-    # Exact match
-    for name in assignee_names:
-        if name.lower() == lower:
-            _cache_name(display_name, name)
-            return name
-
-    # Fuzzy match — pick the best score above threshold
-    best_name = None
-    best_score = 0.0
-    for name in assignee_names:
-        score = _fuzzy_score(display_name, name)
-        if score > best_score:
-            best_score = score
-            best_name = name
-
-    if best_score >= 0.6 and best_name:
-        _cache_name(display_name, best_name)
-        return best_name
-
-    return None
-
-
-def _cache_name(display_name: str, notion_name: str):
-    """Persist a Discord → Notion name pairing."""
-    data = load_data()
-    data.setdefault("name_cache", {})[display_name] = notion_name
-    save_data(data)
-
-
-def _all_notion_names(all_pages: list) -> set[str]:
-    """Collect every unique assignee name across all pages."""
-    names = set()
-    for page in all_pages:
-        names.update(notion.get_assignee_names(page))
-    return names
-
-
-# ─── Core reminder logic (called by tasks + startup catch-up) ─────────────────
-
-async def send_morning_reminder():
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        log.error("Could not find channel %s", CHANNEL_ID)
-        return
-
-    data = load_data()
-    frozen_map = load_frozen_dates()
-
-    # Sync yesterday's stored streak values before displaying
-    process_previous_day(frozen_map)
-
-    streaks, _ = compute_streaks(frozen_map)
-
-    shoutouts = get_milestone_shoutouts(streaks)
-    leaderboard = format_leaderboard(streaks)
-
-    parts = [
-        f"<@&{ROLE_ID}> Did you speak today? "
-        f"Update your streak [here]({NOTION_LINK})! Current Streaks:",
-    ]
-    if shoutouts:
-        parts.append("")
-        parts.extend(shoutouts)
-    parts.append(leaderboard)
-    parts.append("React with 🔥 if you spoke today! React with 🧊 to freeze your streak.")
-
-    sent = await channel.send("\n".join(parts))
-    await sent.add_reaction("🔥")
-    await sent.add_reaction("🧊")
-
-    today_str = datetime.now(PT).date().isoformat()
-    data = load_data()  # reload in case of concurrent writes
-    data["morning_messages"].append({"id": sent.id, "date": today_str})
-    data["morning_messages"] = data["morning_messages"][-14:]
-    save_data(data)
-    await persist_discord_state(channel)
-    log.info("Morning reminder sent for %s", today_str)
-
-
-async def send_evening_reminder():
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        log.error("Could not find channel %s", CHANNEL_ID)
-        return
-
-    data = load_data()
-    frozen_map = load_frozen_dates()
-
-    streaks, _ = compute_streaks(frozen_map)
-    leaderboard = format_leaderboard(streaks)
-
-    parts = [
-        f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
-        leaderboard,
-        "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.",
-    ]
-
-    sent = await channel.send("\n".join(parts))
-    await sent.add_reaction("🔥")
-    await sent.add_reaction("🧊")
-
-    today_str = datetime.now(PT).date().isoformat()
-    data = load_data()
-    data["evening_messages"].append({"id": sent.id, "date": today_str})
-    data["evening_messages"] = data["evening_messages"][-14:]
-    save_data(data)
-    await persist_discord_state(channel)
-    log.info("Evening reminder sent for %s", today_str)
-
-
-# ─── Scheduled tasks ─────────────────────────────────────────────────────────
-
-MORNING_TIME = time(hour=9, minute=0, tzinfo=PT)
-EVENING_TIME = time(hour=21, minute=0, tzinfo=PT)
-MIDNIGHT_TIME = time(hour=0, minute=30, tzinfo=PT)
-
-
-@tasks.loop(time=MORNING_TIME)
-async def morning_task():
-    try:
-        await send_morning_reminder()
-    except Exception as e:
-        log.exception("Error in morning reminder: %s", e)
-
-
-@tasks.loop(time=EVENING_TIME)
-async def evening_task():
-    try:
-        await send_evening_reminder()
-    except Exception as e:
-        log.exception("Error in evening reminder: %s", e)
-
-
-@tasks.loop(time=MIDNIGHT_TIME)
-async def midnight_task():
-    """12:30 AM PT — process the day that just ended and reset poll cache."""
-    try:
-        data = load_data()
-        frozen_map = load_frozen_dates()
-        process_previous_day(frozen_map)
-
-        # Clear cached statuses for the new day
-        data = load_data()
-        data["last_page_statuses"] = {}
-        save_data(data)
-
-        log.info("Midnight recalculation complete")
-    except Exception as e:
-        log.exception("Error in midnight task: %s", e)
-
-
-@tasks.loop(minutes=2)
-async def poll_notion_changes():
-    """Poll Notion every 2 min for status changes on today's pages."""
-    try:
-        today = datetime.now(PT).date()
-        today_pages = notion.get_pages_for_date(today)
-
-        data = load_data()
-        last_statuses = data.get("last_page_statuses", {})
-        changed = False
-
-        for page in today_pages:
-            page_id = page["id"]
-            current_status = notion.get_status(page)
-            prev_status = last_statuses.get(page_id)
-
-            if prev_status is None:
-                # First time seeing this page — record without triggering
-                last_statuses[page_id] = current_status
-                changed = True
-                continue
-
-            if current_status == prev_status:
-                continue
-
-            last_statuses[page_id] = current_status
-            changed = True
-
-            names = notion.get_assignee_names(page)
-            if not names:
-                continue
-            assignee = names[0]
-
-            if current_status == "yes":
-                # Debater marked Yes in Notion — compute and update streak
-                since = today - timedelta(days=14)
-                recent_pages = notion.get_recent_pages(since)
-                debater_raw = [p for p in recent_pages
-                               if assignee in notion.get_assignee_names(p)]
-                debater_pages = sorted(
-                    _deduplicate_pages(debater_raw),
-                    key=notion.get_due_date,
-                    reverse=True,
-                )
-
-                prev_streak = 0
-                found_today = False
-                for p in debater_pages:
-                    if notion.get_due_date(p).date() == today:
-                        found_today = True
-                    elif found_today:
-                        prev_streak = notion.get_streak(p)
-                        break
-
-                new_streak = prev_streak + 1
-                notion.update_page_streak(page_id, new_streak)
-
-                channel = bot.get_channel(CHANNEL_ID)
-                if channel:
-                    emojis = fire_emojis(new_streak)
-                    await channel.send(
-                        f"✅ **{assignee}** spoke today! "
-                        f"Streak updated to **{new_streak}**!{emojis}"
-                    )
-                log.info("Poll: %s marked Yes — streak → %d", assignee, new_streak)
-
-            elif prev_status == "yes":
-                # Reverted from Yes — reset stored streak on this page
-                notion.update_page_streak(page_id, 0)
-                log.info("Poll: %s reverted from Yes — streak reset", assignee)
-
-        if changed:
-            data = load_data()
-            data["last_page_statuses"] = last_statuses
-            save_data(data)
-
-    except Exception as e:
-        log.exception("Error polling Notion: %s", e)
-
-
-# ─── Reaction handlers ───────────────────────────────────────────────────────
-
-@bot.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if _state_message is None:
-        return
-    if payload.user_id == bot.user.id:
-        return
-    if not payload.guild_id:
-        return
-
-    data = load_data()
-    emoji = str(payload.emoji)
-
-    evening_ids = {m["id"]: m["date"] for m in data.get("evening_messages", [])}
-    morning_ids = {m["id"]: m["date"] for m in data.get("morning_messages", [])}
-
-    all_reminder_ids = {**morning_ids, **evening_ids}
-
-    if emoji == "🔥" and payload.message_id in all_reminder_ids:
-        await _handle_fire(payload, all_reminder_ids[payload.message_id])
-    elif emoji == "🧊" and payload.message_id in all_reminder_ids:
-        await _handle_freeze(payload, all_reminder_ids[payload.message_id])
-
-
-async def _handle_fire(payload: discord.RawReactionActionEvent, date_str: str):
-    """🔥 reaction: mark page as Yes, update streak, edit the reminder message."""
-    member = payload.member
-    if not member:
-        return
-
-    channel = bot.get_channel(payload.channel_id)
-    display_name = member.display_name
-    target_date = date.fromisoformat(date_str)
-
-    try:
-        since = target_date - timedelta(days=14)
-        recent_pages = notion.get_recent_pages(since)
-        all_names = _all_notion_names(recent_pages)
-        matched_name = match_display_name(display_name, all_names)
-
-        if not matched_name:
-            log.warning("No Notion match for Discord user '%s'", display_name)
-            if channel:
-                await channel.send(
-                    f"⚠️ Couldn't find a Notion match for **{display_name}**. "
-                    "Make sure your Discord display name matches your Notion name."
-                )
-            return
-
-        # Find this debater's pages, sorted newest first
-        debater_raw = [p for p in recent_pages if matched_name in notion.get_assignee_names(p)]
-        debater_pages = sorted(
-            _deduplicate_pages(debater_raw),
-            key=notion.get_due_date,
-            reverse=True,
-        )
-
-        # Locate target date page and previous page's streak
-        debater_page = None
-        prev_streak = 0
-        found_target = False
-        for p in debater_pages:
-            p_date = notion.get_due_date(p).date()
-            if p_date == target_date:
-                debater_page = p
-                found_target = True
-            elif found_target:
-                prev_streak = notion.get_streak(p)
-                break
-
-        if not debater_page:
-            log.warning("No page found for %s on %s", matched_name, date_str)
-            return
-
-        if notion.get_status(debater_page) == "yes":
-            return  # Already marked
-
-        # Single API call: set status + streak together
-        new_streak = prev_streak + 1
-        notion.update_page_status_and_streak(debater_page["id"], "Yes", new_streak)
-
-        log.info("🔥 %s marked Yes for %s — streak=%d", matched_name, date_str, new_streak)
-
-        # Re-fetch streaks and edit the original evening message with updated table
-        if channel:
-            try:
-                message = await channel.fetch_message(payload.message_id)
-
-                data = load_data()
-                frozen_map = load_frozen_dates()
-                streaks, _ = compute_streaks(frozen_map)
-                # Override with the just-computed value in case cache is stale
-                streaks[matched_name] = new_streak
-                leaderboard = format_leaderboard(streaks)
-
-                parts = [
-                    f"<@&{ROLE_ID}> Did you speak today? Current Streaks:",
-                    leaderboard,
-                    "React with 🔥 if you spoke today! React with 🧊 to freeze your streak.",
-                ]
-                await message.edit(content="\n".join(parts))
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                log.warning("Could not edit evening message: %s", e)
-
-    except Exception as e:
-        log.exception("Error handling 🔥 for %s: %s", display_name, e)
-
-
-async def _handle_freeze(payload: discord.RawReactionActionEvent, date_str: str):
-    """🧊 reaction: record a streak freeze for the day."""
-    member = payload.member
-    if not member:
-        return
-
-    channel = bot.get_channel(payload.channel_id)
-    display_name = member.display_name
-
-    try:
-        since = datetime.now(PT).date() - timedelta(days=14)
-        recent_pages = notion.get_recent_pages(since)
-        all_names = _all_notion_names(recent_pages)
-        matched_name = match_display_name(display_name, all_names)
-
-        if not matched_name:
-            log.warning("No Notion match for Discord user '%s' (freeze)", display_name)
-            if channel:
-                await channel.send(
-                    f"⚠️ Couldn't find a Notion match for **{display_name}**. "
-                    "Make sure your Discord display name matches your Notion name."
-                )
-            return
-
-        data = load_data()
-        frozen_map = load_frozen_dates()
-
-        # Ensure structures exist
-        if matched_name not in data.get("freeze_counts", {}):
-            data.setdefault("freeze_counts", {})[matched_name] = 0
-
-        # Prevent double-freeze on the same day
-        if date_str in frozen_map.get(matched_name, set()):
-            total = data["freeze_counts"][matched_name]
-            if channel:
-                await channel.send(
-                    f"❄️ **{matched_name}**, you already froze today! "
-                    f"You have used **{total}** freeze{'s' if total != 1 else ''} in total."
-                )
-            return
-
-        frozen_map.setdefault(matched_name, set()).add(date_str)
-        data["frozen_dates"] = {k: sorted(v) for k, v in frozen_map.items()}
-        data["freeze_counts"][matched_name] = data.get("freeze_counts", {}).get(matched_name, 0) + 1
-        save_data(data)
-        await persist_discord_state(channel)
-
-        total = data["freeze_counts"][matched_name]
-        if channel:
-            s = "s" if total != 1 else ""
-            await channel.send(
-                f"❄️ Streak frozen! **{matched_name}** has used "
-                f"**{total}** freeze{s} in total."
-            )
-
-        log.info("🧊 %s froze streak for %s (total=%d)", matched_name, date_str, total)
-
-    except Exception as e:
-        log.exception("Error handling 🧊 for %s: %s", display_name, e)
-
-
-# ─── Commands & mention handlers ─────────────────────────────────────────────
-
-@bot.command(name="streaks")
-async def streaks_cmd(ctx):
-    """Display the current streak leaderboard."""
-    try:
-        data = load_data()
-        frozen_map = load_frozen_dates()
-        streaks, _ = compute_streaks(frozen_map)
-        leaderboard = format_leaderboard(streaks)
-        await ctx.send("Current Streaks:\n" + leaderboard)
-    except Exception as e:
-        log.exception("Error in !streaks command: %s", e)
-        await ctx.send("⚠️ Error fetching streaks. Check the logs.")
-
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # Handle @mention commands (e.g. "@squolingo report scores")
-    if bot.user and bot.user.mentioned_in(message) and not message.mention_everyone:
-        content = message.content.lower()
-        for mention in [f"<@{bot.user.id}>", f"<@!{bot.user.id}>"]:
-            content = content.replace(mention, "").strip()
-
-        if "report score" in content or "report streak" in content:
-            await _cmd_report_scores(message)
-        elif "check streak" in content:
-            await _cmd_audit_streaks(message)
-        elif "test reminder" in content:
-            await _cmd_test_reminders(message)
-
-    await bot.process_commands(message)
-
-
-async def _cmd_report_scores(message):
-    """@squolingo report scores — send the current leaderboard."""
-    try:
-        data = load_data()
-        frozen_map = load_frozen_dates()
-        streaks, _ = compute_streaks(frozen_map)
-        leaderboard = format_leaderboard(streaks)
-        await message.channel.send("Current Streaks:\n" + leaderboard)
-    except Exception as e:
-        log.exception("Error in report scores: %s", e)
-        await message.channel.send("⚠️ Error fetching streaks.")
-
-
-async def _cmd_audit_streaks(message):
-    """@squolingo check streak calculations — full audit against all pages."""
-    try:
-        await message.channel.send(
-            "🔍 Running full streak audit and syncing all pages..."
-        )
-        data = load_data()
-        frozen_map = load_frozen_dates()
-
-        # Full sync: walk ALL pages chronologically and fix stored Streak values
-        fixed = sync_all_streaks(frozen_map)
-
-        # Now compute streaks from the corrected data
-        audited_streaks, _ = audit_streaks(frozen_map)
-
-        all_names = sorted(
-            audited_streaks.keys(),
-            key=lambda n: audited_streaks.get(n, 0),
-            reverse=True,
-        )
-
-        lines = ["**Streak Audit Results:**\n```"]
-        lines.append(f"{'Debater':<28} {'Streak':>6}")
-        lines.append("─" * 36)
-
-        for name in all_names:
-            audited = audited_streaks.get(name, 0)
-            lines.append(f"{name:<28} {audited:>6}")
-
-        lines.append("```")
-
-        if fixed:
-            lines.append(f"\n🔧 Fixed **{fixed}** page(s) with incorrect streak values.")
-        else:
-            lines.append("\n✅ All stored streaks were already correct!")
-
-        leaderboard = format_leaderboard(audited_streaks)
-        lines.append("\nCurrent Streaks:")
-        lines.append(leaderboard)
-
-        await message.channel.send("\n".join(lines))
-    except Exception as e:
-        log.exception("Error in audit: %s", e)
-        await message.channel.send("⚠️ Error running streak audit.")
-
-
-async def _cmd_test_reminders(message):
-    """@squolingo test reminders — send both morning and evening reminders."""
-    try:
-        await message.channel.send("🧪 Sending test morning reminder...")
-        await send_morning_reminder()
-        await message.channel.send("🧪 Sending test evening reminder...")
-        await send_evening_reminder()
-        await message.channel.send("✅ Both test reminders sent!")
-    except Exception as e:
-        log.exception("Error in test reminders: %s", e)
-        await message.channel.send("⚠️ Error sending test reminders.")
-
-
-# ─── Bot startup ──────────────────────────────────────────────────────────────
-
 @bot.event
 async def on_ready():
-    log.info("Bot logged in as %s (ID: %s)", bot.user, bot.user.id)
-
     channel = bot.get_channel(CHANNEL_ID)
     if channel is None:
-        log.error("Cannot restore Discord state: channel unavailable.")
+        log.error("Discord state channel unavailable.")
         return
     try:
-        if _state_message is None:
-            await restore_discord_state(channel)
-        else:
+        async with _action_lock:
+            if _state_message is None:
+                await restore_discord_state(channel)
+            data = load_data()
+            _reconcile_all(data, today_pt())
+            save_data(data)
             await persist_discord_state(channel)
+        now = datetime.now(PT)
+        for kind, hour in (("morning", 9), ("evening", 21)):
+            if now.hour >= hour and not any(
+                item["date"] == now.date().isoformat()
+                for item in load_data()[f"{kind}_messages"]
+            ):
+                await send_reminder(kind)
+        for task in (morning_task, evening_task, midnight_task,
+                     reconcile_task, persist_state_task):
+            if not task.is_running():
+                task.start()
     except Exception:
-        log.exception("Cannot restore Discord state; startup aborted to protect streaks.")
-        return
+        log.exception("Startup failed; refusing to discard Discord state.")
 
-    # Sync streaks on startup
-    data = load_data()
-    frozen_map = load_frozen_dates()
-
-    save_frozen_dates(frozen_map)
-    if data.get("morning_messages"):
-        try:
-            process_previous_day(frozen_map)
-        except Exception as e:
-            log.exception("Failed startup streak sync: %s", e)
-    else:
-        log.warning("No reminder history; preserving stored streaks, skipping full sync.")
-
-    # Check if we missed today's reminders (e.g. bot was down)
-    today_str = datetime.now(PT).date().isoformat()
-    now = datetime.now(PT)
-
-    morning_sent = any(
-        m["date"] == today_str for m in data.get("morning_messages", [])
-    )
-    evening_sent = any(
-        m["date"] == today_str for m in data.get("evening_messages", [])
-    )
-
-    if not morning_sent and now.hour >= 9:
-        log.info("Missed morning reminder for %s — sending now", today_str)
-        try:
-            await send_morning_reminder()
-        except Exception as e:
-            log.exception("Failed catch-up morning reminder: %s", e)
-
-    if not evening_sent and now.hour >= 21:
-        log.info("Missed evening reminder for %s — sending now", today_str)
-        try:
-            await send_evening_reminder()
-        except Exception as e:
-            log.exception("Failed catch-up evening reminder: %s", e)
-
-    # Start scheduled loops
-    if not morning_task.is_running():
-        morning_task.start()
-    if not evening_task.is_running():
-        evening_task.start()
-    if not midnight_task.is_running():
-        midnight_task.start()
-    if not poll_notion_changes.is_running():
-        poll_notion_changes.start()
-    if not persist_state_task.is_running():
-        persist_state_task.start()
-
-
-# ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)

@@ -1,32 +1,26 @@
 import asyncio
 import json
 import os
-import tempfile
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 with patch.dict(os.environ, {
     "DISCORD_TOKEN": "test", "CHANNEL_ID": "1", "LOCKED_IN_ROLE_ID": "2",
-    "NOTION_LINK": "test", "NOTION_TOKEN": "test", "DATABASE_ID": "test",
 }):
     import bot
 
 
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        root = self.directory.name
-        self.paths = patch.multiple(
-            bot, APP_DIR=root, BOT_DATA_FILE=os.path.join(root, "bot_data.json"),
-            FROZEN_DATES_FILE=os.path.join(root, "frozen_dates.json"),
-            _state=None, _state_message=None, _state_revision=0,
-            _saved_revision=-1, _state_lock=asyncio.Lock(),
+        self.state = patch.multiple(
+            bot, _state=None, _state_message=None, _state_revision=0,
+            _saved_revision=-1, _state_lock=asyncio.Lock(), _action_lock=asyncio.Lock(),
         )
-        self.paths.start()
-        self.addCleanup(self.paths.stop)
-        self.addCleanup(self.directory.cleanup)
-        self.message = Mock(author=Mock(id=1), content=bot.STATE_MARKER)
+        self.state.start()
+        self.addCleanup(self.state.stop)
+        self.message = Mock(author=Mock(id=1), content=bot.STATE_MARKER,
+                            created_at=datetime(2026, 10, 26, tzinfo=bot.PT))
         self.message.edit = AsyncMock()
         self.channel = Mock(send=AsyncMock(return_value=self.message))
 
@@ -36,10 +30,13 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
             uploaded.append(file.fp.read())
             return self.message
         self.channel.send.side_effect = send
-        bot.save_data(bot._default_data())
+        data = bot._default_data()
+        data["participants"]["5"] = bot.new_person(
+            "Debater", [1, 3], datetime(2026, 10, 25).date(), 227
+        )
+        bot.save_data(data)
         bot.save_frozen_dates({"debater": {"2026-10-25"}})
         await bot.persist_discord_state(self.channel)
-        self.assertEqual(bot.load_frozen_dates(), {"debater": {"2026-10-25"}})
         self.message.attachments = [Mock(read=AsyncMock(return_value=uploaded[0]))]
         async def history(**kwargs):
             yield self.message
@@ -49,8 +46,8 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot, "bot", Mock(user=Mock(id=1))):
             await bot.restore_discord_state(self.channel)
         self.assertEqual(bot.load_frozen_dates(), {"debater": {"2026-10-25"}})
-        self.assertFalse(os.path.exists(bot.BOT_DATA_FILE))
-        self.assertFalse(os.path.exists(bot.FROZEN_DATES_FILE))
+        self.assertEqual(bot.load_data()["participants"]["5"]["schedule"], [1, 3])
+        self.assertEqual(bot.load_data()["participants"]["5"]["streak"], 227)
         bot.save_frozen_dates({"debater": {"2026-10-25", "2026-10-30"}})
         await bot.persist_discord_state(self.channel)
         self.message.edit.assert_awaited_once()
@@ -75,40 +72,25 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
                 await bot.restore_discord_state(self.channel)
         self.channel.send.assert_not_awaited()
 
-    async def test_missing_state_migrates_legacy_history(self):
-        with open(bot.FROZEN_DATES_FILE, "w") as f:
-            json.dump({"debater": ["2026-06-15"]}, f)
-        with open(bot.BOT_DATA_FILE, "w") as f:
-            json.dump({"frozen_dates": {"debater": ["2026-10-25"]}}, f)
+    async def test_old_discord_state_and_leaderboard_migrate_without_notion(self):
+        payload = {"frozen_dates": {"aanya": ["2026-10-25"]},
+                   "freeze_counts": {"aanya": 9}}
+        self.message.attachments = [Mock(read=AsyncMock(return_value=json.dumps(payload).encode()))]
+        reminder = Mock(author=Mock(id=1),
+                        content="Current Streaks:\n```\naanya 🔥🔥    227\nEthan    0\n```",
+                        created_at=datetime(2026, 10, 25, 21, tzinfo=bot.PT))
         async def history(**kwargs):
-            if False:
-                yield
+            yield self.message
+            yield reminder
         self.channel.history = history
-        await bot.restore_discord_state(self.channel)
-        self.assertEqual(bot.load_frozen_dates()["debater"],
-                         {"2026-06-15", "2026-10-25"})
-        self.channel.send.assert_awaited_once()
-
-    async def test_fresh_startup_never_rewrites_history(self):
-        clock = Mock()
-        clock.now.return_value = datetime(2026, 10, 26, 8, tzinfo=bot.PT)
-        loops = {
-            name: Mock(is_running=Mock(return_value=True))
-            for name in ("morning_task", "evening_task", "midnight_task",
-                         "poll_notion_changes", "persist_state_task")
-        }
-        async def history(**kwargs):
-            if False:
-                yield
-        self.channel.history = history
-        client = Mock(user=Mock(id=1), get_channel=Mock(return_value=self.channel))
-        with patch.multiple(bot, **loops), patch.object(bot, "datetime", clock), \
-                patch.object(bot, "bot", client), \
-                patch.object(bot, "sync_all_streaks") as full_sync, \
-                patch.object(bot, "process_previous_day") as previous_day:
-            await bot.on_ready()
-        full_sync.assert_not_called()
-        previous_day.assert_not_called()
+        with patch.object(bot, "bot", Mock(user=Mock(id=1))), \
+                patch.object(bot, "today_pt", return_value=datetime(2026, 10, 26).date()):
+            await bot.restore_discord_state(self.channel)
+        data = bot.load_data()
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["legacy_scores"]["aanya"]["streak"], 227)
+        self.assertEqual(data["legacy_freeze_counts"]["aanya"], 9)
+        self.message.edit.assert_awaited_once()
 
 
 if __name__ == "__main__":
