@@ -164,6 +164,37 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("react with", call.args[0].lower())
             self.assertTrue(call.kwargs["view"].is_persistent())
 
+    async def test_race_cards_attach_real_streaks_and_refresh_replaces_old_images(self):
+        data = bot.load_data()
+        data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 61)
+        data["morning_messages"] = [{"id": 10, "date": "2026-10-20"}]
+        bot.save_data(data)
+        reminder = Mock(edit=AsyncMock(), reactions=[])
+        self.channel.send.return_value = Mock(id=20)
+        self.channel.fetch_message = AsyncMock(return_value=reminder)
+        with patch.object(bot, "race_attachments", return_value=[b"GIF89a"]) as render, \
+                patch.object(bot, "persist_discord_state", AsyncMock()), \
+                patch.object(bot, "bot", Mock(get_channel=Mock(return_value=self.channel))):
+            await bot.send_evening_reminder()
+            await bot.refresh_reminders(self.channel, data)
+        render.assert_called_with(data, date(2026, 10, 20))
+        sent = self.channel.send.call_args.kwargs
+        self.assertEqual(sent["files"][0].filename, "shark-race-1.gif")
+        self.assertEqual(sent["embeds"][0].image.url, "attachment://shark-race-1.gif")
+        self.assertEqual(len(sent["embeds"][0].fields), 0)
+        edited = reminder.edit.call_args.kwargs
+        self.assertEqual(len(edited["attachments"]), 1)
+        self.assertIsNot(sent["files"][0], edited["attachments"][0])
+
+    async def test_race_render_failure_retains_text_scores_and_buttons(self):
+        data = bot.load_data()
+        data["legacy_scores"] = {"Debater": {"streak": 61}}
+        with patch.object(bot, "race_attachments", side_effect=OSError("Missing font")):
+            with self.assertLogs("squolingo", level="ERROR"):
+                embeds, images = await bot.reminder_cards(data, date(2026, 10, 20))
+        self.assertEqual(images, [])
+        self.assertIn("Debater", embeds[0].fields[0].name)
+
     async def test_speaking_edits_reminders_without_removing_reactions(self):
         data = bot.load_data()
         data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 9)

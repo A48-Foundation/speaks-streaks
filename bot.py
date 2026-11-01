@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
+from shark_race import race_attachments
 from streak_display import (
     FIRE_EMOJIS, FIRE_EMOJI_PREFIX, FIRE_TIERS, flame_badge, flame_png,
     leaderboard_embed, milestone_gif, tier, week_embed,
@@ -227,8 +228,11 @@ async def send_reminder(kind):
         _reconcile_all(data, today)
         save_data(data)
         await persist_discord_state(channel)
+        embeds, images = await reminder_cards(data, today)
+        files = [discord.File(io.BytesIO(image), filename=f"shark-race-{index + 1}.gif")
+                 for index, image in enumerate(images)]
         sent = await channel.send(reminder_content(data),
-                                  embed=leaderboard_embed(data, today), view=ReminderView())
+                                  embeds=embeds, files=files, view=ReminderView())
         key = f"{kind}_messages"
         data[key].append({"id": sent.id, "date": today.isoformat()})
         data[key] = data[key][-14:]
@@ -246,19 +250,46 @@ async def send_evening_reminder():
 
 async def refresh_reminders(channel, data):
     today = today_pt().isoformat()
+    if not any(item["date"] == today for key in ("morning_messages", "evening_messages")
+               for item in data[key]):
+        return
+    embeds, images = await reminder_cards(data, today_pt())
     for key in ("morning_messages", "evening_messages"):
         for item in data[key]:
             if item["date"] == today:
                 try:
                     message = await channel.fetch_message(item["id"])
+                    files = [discord.File(io.BytesIO(image), filename=f"shark-race-{index + 1}.gif")
+                             for index, image in enumerate(images)]
                     await message.edit(content=reminder_content(data),
-                                       embed=leaderboard_embed(data, today_pt()),
+                                       embeds=embeds, attachments=files,
                                        view=ReminderView())
                     await clear_reminder_reactions(message)
                 except discord.NotFound:
                     continue
                 except discord.HTTPException:
                     log.exception("Could not refresh reminder.")
+
+
+async def reminder_cards(data, today):
+    fallback = leaderboard_embed(data, today)
+    try:
+        images = await asyncio.to_thread(race_attachments, data, today)
+    except (OSError, ValueError):
+        log.exception("Shark rendering failed; using the text leaderboard.")
+        return [fallback], []
+    if not images:
+        return [fallback], []
+    embeds = []
+    for index in range(len(images)):
+        embed = discord.Embed.from_dict(fallback.to_dict())
+        embed.clear_fields()
+        if index:
+            embed.title = "Speaking streaks (continued)"
+            embed.description = None
+        embed.set_image(url=f"attachment://shark-race-{index + 1}.gif")
+        embeds.append(embed)
+    return embeds, images
 
 
 async def clear_reminder_reactions(message):

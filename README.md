@@ -69,9 +69,21 @@ syntax is `@Squolingo schedule daily` or
 
 ## Live cards and milestones
 
-Reminders now show a ranked Discord embed with one colored flame badge, progress
-to the next major milestone, and today's speaking/freeze status. Zero streaks
-stay hidden. Cards update after speaking, freezing, and schedule changes.
+Reminders show animated, original pixel-art shark races using **real streaks**.
+Each debater keeps a name-based color and shark type (reef, hammerhead, tiger,
+or whale) even when ranks change. Larger, crisp **Silkscreen** pixel-font status text
+under each name reads **spoke today**, **frozen**, or **not yet**; ice surrounds
+frozen sharks. Zero streaks stay hidden. Cards update after speaking, freezing,
+and schedule changes.
+
+All lanes share a scale with 10- and 50-day markers, starting at a 300-day
+finish line and extending when necessary. Sharks have no medals. Decorative
+motion never changes streak credit. Large races split into five-shark images, up to
+the top 20 debaters, so Discord does not shrink one extremely tall image.
+If rendering fails, reminders fall back to the readable text leaderboard.
+
+Text reports and private weekly cards retain their colored flame badges and
+milestone progress:
 
 Flames intensify by streak: **red 1-49**, **orange 50-99**, and **blue 100+**.
 Each uses a vibrant outer flame and contrasting inner flame. Rank is a plain
@@ -92,6 +104,11 @@ celebrations. GIF playback depends on the viewer's Discord motion settings.
 The bot needs **Embed Links** permission in addition to the permissions above.
 Use `@Squolingo test reminders` to preview both cards without granting speaking
 credit or replaying milestone celebrations.
+
+For an offline, illustrative preview without touching Discord state, run
+`python race_preview.py --output preview` and open `preview/index.html`.
+The status font is bundled under the SIL Open Font License; see
+`assets/Silkscreen-OFL.txt`.
 
 Flame silhouette: [Flaticon flame icon 8545117](https://www.flaticon.com/free-icon/flame_8545117).
 The original creator is credited through this source link and in bot help;
