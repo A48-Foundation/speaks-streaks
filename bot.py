@@ -593,10 +593,14 @@ async def dispatch(member, text, channel):
                                                 "check streak calculations"):
         async with _action_lock:
             data = load_data()
-            _reconcile_all(data, today_pt())
+            today = today_pt()
+            _reconcile_all(data, today)
             save_data(data)
             await persist_discord_state(channel)
-            await channel.send(embed=leaderboard_embed(data, today_pt()))
+            embeds, images = await reminder_cards(data, today)
+            files = [discord.File(io.BytesIO(image), filename=f"shark-race-{index + 1}.gif")
+                     for index, image in enumerate(images)]
+            await channel.send(embeds=embeds, files=files)
     elif text.lower() == "test reminders":
         await send_morning_reminder()
         await send_evening_reminder()

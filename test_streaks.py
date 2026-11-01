@@ -195,6 +195,21 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(images, [])
         self.assertIn("Debater", embeds[0].fields[0].name)
 
+    async def test_all_report_commands_show_shark_race_attachments(self):
+        data = bot.load_data()
+        data["legacy_scores"] = {"Debater": {"streak": 61}}
+        bot.save_data(data)
+        with patch.object(bot, "race_attachments", return_value=[b"GIF89a"]), \
+                patch.object(bot, "persist_discord_state", AsyncMock()):
+            for command in ("streaks", "report scores", "report streaks",
+                            "check streak calculations"):
+                await bot.dispatch(self.member, command, self.channel)
+        self.assertEqual(self.channel.send.await_count, 4)
+        for call in self.channel.send.call_args_list:
+            self.assertEqual(call.kwargs["files"][0].filename, "shark-race-1.gif")
+            self.assertEqual(call.kwargs["embeds"][0].image.url,
+                             "attachment://shark-race-1.gif")
+
     async def test_speaking_edits_reminders_without_removing_reactions(self):
         data = bot.load_data()
         data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 9)

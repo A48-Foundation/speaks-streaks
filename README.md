@@ -38,7 +38,7 @@ their own schedule; registrations use Discord user IDs, not names.
 | `!schedule off` | Pause commitments without deleting your streak |
 | `!speak` | Record speaking today |
 | `!freeze` | Freeze today's scheduled commitment |
-| `!streaks` | Show positive streaks only |
+| `!streaks` | Show the shark race for positive streaks |
 | `!test reminders` | Send both reminders |
 
 Mention commands also work: `@Squolingo schedule tue thu`,
@@ -82,8 +82,8 @@ motion never changes streak credit. Large races split into five-shark images, up
 the top 20 debaters, so Discord does not shrink one extremely tall image.
 If rendering fails, reminders fall back to the readable text leaderboard.
 
-Text reports and private weekly cards retain their colored flame badges and
-milestone progress:
+Reports (`@Squolingo report scores` or `!streaks`) also show the shark race.
+Text fallbacks and private weekly cards retain their colored flame badges:
 
 Flames intensify by streak: **red 1-49**, **orange 50-99**, and **blue 100+**.
 Each uses a vibrant outer flame and contrasting inner flame. Rank is a plain
