@@ -68,6 +68,41 @@ class StreakTests(unittest.TestCase):
         self.assertNotIn("LegacyZero", text)
         self.assertIn("1", data["participants"])
 
+    def test_october_recovery_repairs_legacy_totals_once(self):
+        data = bot._default_data()
+        data["legacy_scores"] = {
+            "aanya": {"streak": 5}, "Ethan": {"streak": 0}, "Julia Ye": {"streak": 1},
+        }
+        self.assertTrue(bot.recover_october_totals(data, date(2026, 11, 1)))
+        self.assertEqual({name: value["streak"] for name, value in data["legacy_scores"].items()},
+                         {"aanya": 232, "Ethan": 15, "Julia Ye": 61})
+        data["legacy_scores"]["aanya"]["streak"] = 233
+        self.assertFalse(bot.recover_october_totals(data, date(2026, 11, 1)))
+        self.assertEqual(data["legacy_scores"]["aanya"]["streak"], 233)
+
+    def test_recovery_preserves_current_day_credit_freeze_and_schedule(self):
+        data = bot._default_data()
+        today = date(2026, 11, 1)
+        for user_id, name, result in (("1", "aanya", "yes"),
+                                     ("2", "Ethan", "frozen"),
+                                     ("3", "Julia Ye", None)):
+            person = new_person(name, [6], today, 5)
+            if result:
+                person["results"][today.isoformat()] = result
+            data["participants"][user_id] = person
+        self.assertTrue(bot.recover_october_totals(data, today))
+        self.assertEqual([p["streak"] for p in data["participants"].values()], [233, 15, 61])
+        self.assertEqual(data["participants"]["2"]["results"][today.isoformat()], "frozen")
+        self.assertEqual(data["participants"]["1"]["schedule"], [6])
+        record(data["participants"]["1"], today, "yes")
+        self.assertEqual(data["participants"]["1"]["streak"], 233)
+
+    def test_historical_recovery_does_not_override_later_resets(self):
+        data = bot._default_data()
+        data["participants"]["1"] = new_person("aanya", [6], date(2026, 11, 2), 0)
+        self.assertFalse(bot.recover_october_totals(data, date(2026, 11, 2)))
+        self.assertEqual(data["participants"]["1"]["streak"], 0)
+
 
 class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -217,6 +252,30 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Debater", state["legacy_scores"])
         self.assertEqual(state["participants"]["5"]["streak"], 232)
         self.assertEqual(state["participants"]["5"]["schedule"], [])
+
+    async def test_startup_applies_and_persists_assumed_recovery_only_once(self):
+        data = bot.load_data()
+        data["legacy_scores"] = {"aanya": {"streak": 5}, "Ethan": {"streak": 0},
+                                 "Julia Ye": {"streak": 1}}
+        data["morning_messages"] = [{"id": 10, "date": "2026-11-01"}]
+        bot.save_data(data)
+        loops = {name: Mock(is_running=Mock(return_value=True)) for name in
+                 ("morning_task", "evening_task", "midnight_task",
+                  "reconcile_task", "persist_state_task")}
+        clock = Mock()
+        clock.now.return_value = bot.datetime(2026, 11, 1, 13, tzinfo=bot.PT)
+        with patch.multiple(bot, **loops), patch.object(bot, "datetime", clock), \
+                patch.object(bot, "today_pt", return_value=date(2026, 11, 1)), \
+                patch.object(bot, "bot", Mock(get_channel=Mock(return_value=self.channel))), \
+                patch.object(bot, "persist_discord_state", AsyncMock()) as persist, \
+                patch.object(bot, "refresh_reminders", AsyncMock()):
+            await bot.on_ready()
+            await bot.on_ready()
+        persist.assert_awaited()
+        self.assertEqual(bot.load_data()["legacy_scores"]["Ethan"]["streak"], 15)
+        notices = [call for call in self.channel.send.call_args_list
+                   if "recovery applied" in call.args[0]]
+        self.assertEqual(len(notices), 1)
 
 
 if __name__ == "__main__":

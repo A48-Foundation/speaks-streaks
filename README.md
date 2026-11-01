@@ -103,6 +103,15 @@ October transcript supports aanya at 232 through October 31; add any confirmed
 speaking since then and account for any missed scheduled days before applying
 that historical number.
 
+The November 1 recovery runs once on startup and records its assumptions in
+Discord state: aanya 232, Ethan 15, and Julia Ye 61 through October 31. Ethan
+and Julia are assumed to have spoken daily October 26-31 at the user's request.
+Already-recorded November 1 speaking adds one; existing schedules and today's
+freezes are retained. Unregistered debaters keep repaired legacy values until
+they choose a schedule. This automatic recovery is limited to November 1 to
+avoid overriding later legitimate missed days. Subsequent restarts do not
+reapply it.
+
 ## Tests
 
 ```text

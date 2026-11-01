@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
@@ -166,6 +166,43 @@ async def persist_discord_state(channel=None):
 def _reconcile_all(data, today):
     for person in data["participants"].values():
         reconcile(person, today)
+
+
+def recover_october_totals(data, today):
+    """Apply the supplied October baseline and explicitly assumed attendance once."""
+    recovery_id = "october-2026-reset"
+    if recovery_id in data.get("recoveries", {}):
+        return False
+    # Later dates require attendance after this verified recovery window.
+    if today != date(2026, 11, 1):
+        return False
+    totals = {"aanya": 232, "Ethan": 15, "Julia Ye": 61}
+    changes = []
+    for name, total in totals.items():
+        matched = False
+        for user_id, person in data["participants"].items():
+            identity = data.get("name_cache", {}).get(person["name"], person["name"])
+            if identity.casefold() != name.casefold():
+                continue
+            previous = person["streak"]
+            # The baseline ends yesterday; retain any credit already earned today.
+            person["streak"] = total + (person["results"].get(today.isoformat()) == "yes")
+            person["processed_through"] = (today - timedelta(days=1)).isoformat()
+            changes.append({"user_id": user_id, "name": name, "previous": previous,
+                            "total": person["streak"]})
+            matched = True
+        if not matched:
+            key = next((key for key in data["legacy_scores"]
+                        if key.casefold() == name.casefold()), name)
+            previous = data["legacy_scores"].get(key, {}).get("streak", 0)
+            data["legacy_scores"][key] = {"streak": total, "date": "2026-10-31"}
+            changes.append({"name": name, "previous": previous, "total": total})
+    data.setdefault("recoveries", {})[recovery_id] = {
+        "baseline_date": "2026-10-31",
+        "assumption": "Ethan and Julia spoke daily October 26-31, per user request.",
+        "changes": changes,
+    }
+    return True
 
 
 def format_leaderboard(data):
@@ -493,9 +530,19 @@ async def on_ready():
             if _state_message is None:
                 await restore_discord_state(channel)
             data = load_data()
+            recovered = recover_october_totals(data, today_pt())
             _reconcile_all(data, today_pt())
             save_data(data)
             await persist_discord_state(channel)
+        if recovered:
+            await refresh_reminders(channel, data)
+            await channel.send(
+                "October streak recovery applied. Totals through October 31: "
+                "**aanya 232 · Ethan 15 · Julia Ye 61**. "
+                "Ethan and Julia's attendance was assumed complete as requested. "
+                "Any speaking already recorded on November 1 is retained. "
+                "Set your schedule with `@Squolingo schedule daily` or chosen weekdays."
+            )
         now = datetime.now(PT)
         for kind, hour in (("morning", 9), ("evening", 21)):
             if now.hour >= hour and not any(
