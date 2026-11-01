@@ -67,9 +67,15 @@ syntax is `@Squolingo schedule daily` or
 
 ## Live cards and milestones
 
-Reminders now show a ranked Discord embed with medals, tier badges, progress
+Reminders now show a ranked Discord embed with one colored flame badge, progress
 to the next major milestone, and today's speaking/freeze status. Zero streaks
 stay hidden. Cards update after speaking, freezing, and schedule changes.
+
+Flames intensify by streak: **red 1-49**, **orange 50-99**, **gold 100-199**,
+**white-hot 200-299**, **purple 300-499**, and **blue 500+**. Rank is a plain
+number, not another medal. The bot generates and reuses its own application
+emojis at startup; no server emoji uploads are needed. If the emoji API is
+unavailable, a standard flame plus the color's name is shown instead.
 
 Persistent **Spoke**, **Freeze**, **My schedule**, and **My week** buttons
 work after restarts. My schedule opens a form; My week shows a private

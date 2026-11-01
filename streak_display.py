@@ -9,21 +9,76 @@ from PIL import Image, ImageDraw, ImageFont
 
 from streaks import DAYS
 
+FIRE_TIERS = (
+    (500, "blue", "Blue fire", 0x3B82F6),
+    (300, "purple", "Purple fire", 0xA855F7),
+    (200, "white_hot", "White-hot fire", 0xF8FAFC),
+    (100, "gold", "Gold fire", 0xFBBF24),
+    (50, "orange", "Orange fire", 0xFB923C),
+    (0, "red", "Red fire", 0xEF4444),
+)
+FIRE_EMOJIS = {}
+
 
 def next_milestone(streak):
     return 50 if streak < 50 else 100 if streak < 100 else (streak // 100 + 1) * 100
 
 
+def fire_tier(streak):
+    return next(item for item in FIRE_TIERS if streak >= item[0])
+
+
 def tier(streak):
-    for minimum, label, color in (
-        (300, "💎 Diamond", 0xA78BFA),
-        (200, "🏆 Gold", 0xFBBF24),
-        (100, "🥈 Silver", 0xCBD5E1),
-        (50, "🥉 Bronze", 0xFB923C),
+    _, _, label, color = fire_tier(streak)
+    return label, color
+
+
+def flame_badge(streak):
+    _, key, label, _ = fire_tier(streak)
+    # The label keeps tiers distinguishable if emoji upload is unavailable.
+    return FIRE_EMOJIS.get(key, f"🔥 {label}")
+
+
+def flame_png(color):
+    """Draw a transparent, antialiased flame for an application emoji."""
+    def curve(start, control1, control2, end):
+        points = []
+        for step in range(21):
+            t = step / 20
+            points.append(tuple(4 * ((1 - t) ** 3 * start[axis]
+                                    + 3 * (1 - t) ** 2 * t * control1[axis]
+                                    + 3 * (1 - t) * t ** 2 * control2[axis]
+                                    + t ** 3 * end[axis]) for axis in (0, 1)))
+        return points
+
+    outer = []
+    for segment in (
+        ((68, 7), (78, 38), (110, 45), (110, 80)),
+        ((110, 80), (110, 107), (88, 124), (64, 124)),
+        ((64, 124), (39, 124), (17, 104), (18, 82)),
+        ((18, 82), (19, 66), (33, 53), (39, 42)),
+        ((39, 42), (38, 62), (47, 70), (51, 72)),
+        ((51, 72), (58, 52), (49, 31), (68, 7)),
     ):
-        if streak >= minimum:
-            return label, color
-    return "🔥 Ember", 0xF97316
+        outer.extend(curve(*segment))
+    accent = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
+    image = Image.new("RGBA", (512, 512))
+    draw = ImageDraw.Draw(image)
+    draw.polygon(outer, fill=accent + (255,))
+    inner = []
+    for segment in (
+        ((65, 65), (73, 83), (89, 88), (87, 104)),
+        ((87, 104), (85, 119), (43, 124), (42, 102)),
+        ((42, 102), (41, 89), (53, 85), (55, 79)),
+        ((55, 79), (53, 89), (62, 93), (65, 65)),
+    ):
+        inner.extend(curve(*segment))
+    core = tuple(int(channel + (255 - channel) * 0.75) for channel in accent)
+    draw.polygon(inner, fill=core + (255,))
+    image = image.resize((128, 128), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 def progress(streak):
@@ -36,29 +91,28 @@ def leaderboard_embed(data, today):
     rows = [(p["name"], p["streak"], p) for p in data["participants"].values()]
     rows.extend((name, p["streak"], None) for name, p in data["legacy_scores"].items())
     rows = sorted((r for r in rows if r[1] > 0), key=lambda r: (-r[1], r[0]))
-    embed = discord.Embed(title="🔥 Speaking streaks", color=0xF97316)
+    embed = discord.Embed(title="Speaking streaks",
+                          color=tier(rows[0][1] if rows else 0)[1])
     embed.set_footer(text=f"{today:%b %d, %Y} · Pacific time · Updates when you speak or freeze")
     if not rows:
         embed.description = "Your next streak starts here. Choose **My schedule**, then **Spoke**."
         return embed
     for index, (name, streak, person) in enumerate(rows[:20]):
-        medal = ("🥇", "🥈", "🥉")[index] if index < 3 else f"#{index + 1}"
-        badge, _ = tier(streak)
         bar, target = progress(streak)
         if person is None:
-            status = "📅 Choose your schedule to resume"
+            status = "Choose your schedule to resume"
         elif person["results"].get(today.isoformat()) == "yes":
-            status = "✅ Spoken today"
+            status = "Spoken today"
         elif person["results"].get(today.isoformat()) == "frozen":
-            status = "🧊 Frozen today"
+            status = "Frozen today"
         elif today.weekday() not in person["schedule"]:
-            status = "🌙 No commitment today"
+            status = "No commitment today"
         else:
-            status = "⏳ Scheduled today"
+            status = "Scheduled today"
         clean_name = discord.utils.escape_markdown(name.replace("\n", " ").replace("\r", " "))[:60]
         embed.add_field(
-            name=f"{medal} {clean_name} · {streak} speaks",
-            value=f"{badge} · {status}\n{bar} **{streak}/{target}** · {target - streak} to go",
+            name=f"{flame_badge(streak)} #{index + 1} {clean_name} · {streak} speaks",
+            value=f"{status}\n{bar} **{streak}/{target}** · {target - streak} to go",
             inline=False,
         )
     if len(rows) > 20:
@@ -85,10 +139,11 @@ def week_embed(person, today):
         else:
             status = "📅 Scheduled"
         lines.append(f"**{label.title()} {day.day}** · {status}")
-    badge, color = tier(person["streak"])
+    _, color = tier(person["streak"])
     embed = discord.Embed(title="📅 Your speaking week", color=color,
                           description="\n".join(lines))
-    embed.add_field(name="Current streak", value=f"{badge} · **{person['streak']} speaks**")
+    embed.add_field(name="Current streak",
+                    value=f"{flame_badge(person['streak'])} **{person['streak']} speaks**")
     embed.set_footer(text="Pacific time · Unrecorded days shown against your current schedule")
     return embed
 

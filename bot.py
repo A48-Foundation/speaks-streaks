@@ -15,7 +15,10 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
-from streak_display import leaderboard_embed, milestone_gif, tier, week_embed
+from streak_display import (
+    FIRE_EMOJIS, FIRE_TIERS, flame_badge, flame_png,
+    leaderboard_embed, milestone_gif, tier, week_embed,
+)
 
 load_dotenv()
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
@@ -30,6 +33,7 @@ _saved_revision = -1
 _state_lock = asyncio.Lock()
 _action_lock = asyncio.Lock()
 _view_registered = False
+_fire_emojis_initialized = False
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("squolingo")
@@ -333,8 +337,8 @@ async def celebrate_milestone(member, streak, channel):
     if streak != 50 and streak % 100 != 0:
         await channel.send(content)
         return
-    badge, color = tier(streak)
-    embed = discord.Embed(title=f"{badge} · {streak} speaks!",
+    _, color = tier(streak)
+    embed = discord.Embed(title=f"{flame_badge(streak)} · {streak} speaks!",
                           description="One commitment at a time. A milestone worth celebrating.",
                           color=color)
     embed.set_image(url="attachment://milestone.gif")
@@ -624,6 +628,23 @@ async def persist_state_task():
         log.exception("Failed saving state to Discord; will retry.")
 
 
+async def ensure_fire_emojis():
+    global _fire_emojis_initialized
+    if _fire_emojis_initialized:
+        return
+    try:
+        existing = {emoji.name: emoji for emoji in await bot.fetch_application_emojis()}
+        for _, key, _, color in FIRE_TIERS:
+            name = f"squolingo_fire_{key}"
+            emoji = existing.get(name)
+            if emoji is None:
+                emoji = await bot.create_application_emoji(name=name, image=flame_png(color))
+            FIRE_EMOJIS[key] = str(emoji)
+        _fire_emojis_initialized = True
+    except discord.HTTPException:
+        log.exception("Colored flame emoji setup failed; using labeled flame fallback.")
+
+
 @bot.event
 async def on_ready():
     global _view_registered
@@ -640,6 +661,7 @@ async def on_ready():
             _reconcile_all(data, today_pt())
             save_data(data)
             await persist_discord_state(channel)
+        await ensure_fire_emojis()
         if not _view_registered:
             bot.add_view(ReminderView())
             _view_registered = True

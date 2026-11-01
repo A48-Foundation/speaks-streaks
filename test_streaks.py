@@ -110,6 +110,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
             bot, _state=bot._default_data(), _state_message=Mock(),
             _state_revision=0, _saved_revision=0, _action_lock=asyncio.Lock(),
             _view_registered=False,
+            _fire_emojis_initialized=False,
         )
         self.state.start()
         self.addCleanup(self.state.stop)
@@ -270,6 +271,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot, "today_pt", return_value=date(2026, 11, 1)), \
                 patch.object(bot, "bot", client), \
                 patch.object(bot, "persist_discord_state", AsyncMock()) as persist, \
+                patch.object(bot, "ensure_fire_emojis", AsyncMock()), \
                 patch.object(bot, "refresh_reminders", AsyncMock()):
             await bot.on_ready()
             await bot.on_ready()
@@ -280,6 +282,34 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(notices), 1)
         client.add_view.assert_called_once()
         self.assertTrue(client.add_view.call_args.args[0].is_persistent())
+
+    async def test_colored_flames_reuse_existing_emoji_and_create_missing_once(self):
+        red = bot.discord.PartialEmoji(name="squolingo_fire_red", id=1)
+        created = []
+        async def create(name, image):
+            self.assertTrue(image.startswith(b"\x89PNG"))
+            emoji = bot.discord.PartialEmoji(name=name, id=len(created) + 2)
+            created.append(emoji)
+            return emoji
+        client = Mock(fetch_application_emojis=AsyncMock(return_value=[red]),
+                      create_application_emoji=AsyncMock(side_effect=create))
+        with patch.dict(bot.FIRE_EMOJIS, {}, clear=True), patch.object(bot, "bot", client):
+            await bot.ensure_fire_emojis()
+            await bot.ensure_fire_emojis()
+            self.assertEqual(len(bot.FIRE_EMOJIS), 6)
+            self.assertIn("squolingo_fire_blue", bot.FIRE_EMOJIS["blue"])
+            self.assertEqual(bot.FIRE_EMOJIS["red"], str(red))
+        client.fetch_application_emojis.assert_awaited_once()
+        self.assertEqual(client.create_application_emoji.await_count, 5)
+
+    async def test_failed_emoji_setup_keeps_labeled_fallback_available(self):
+        error = bot.discord.Forbidden(Mock(status=403, reason="Forbidden"), "Denied")
+        client = Mock(fetch_application_emojis=AsyncMock(side_effect=error))
+        with patch.dict(bot.FIRE_EMOJIS, {}, clear=True), patch.object(bot, "bot", client):
+            with self.assertLogs("squolingo", level="ERROR"):
+                await bot.ensure_fire_emojis()
+            self.assertEqual(bot.flame_badge(500), "🔥 Blue fire")
+            self.assertFalse(bot._fire_emojis_initialized)
 
     async def test_spoke_button_and_fire_reaction_cannot_double_credit(self):
         data = bot.load_data()

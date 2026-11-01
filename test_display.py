@@ -1,9 +1,13 @@
 import unittest
+import io
 from datetime import date
+from unittest.mock import patch
 
 from PIL import Image
 
-from streak_display import leaderboard_embed, milestone_gif, next_milestone, week_embed
+from streak_display import (
+    FIRE_EMOJIS, flame_png, leaderboard_embed, milestone_gif, next_milestone, week_embed,
+)
 from streaks import new_person
 
 
@@ -15,7 +19,7 @@ class DisplayTests(unittest.TestCase):
         embed = leaderboard_embed(data, date(2026, 11, 1))
         self.assertIn("232/300", embed.fields[0].value)
         self.assertIn("68 to go", embed.fields[0].value)
-        self.assertIn("Gold", embed.fields[0].value)
+        self.assertNotIn("Gold", embed.fields[0].value)
 
     def test_card_orders_positive_streaks_and_shows_daily_status(self):
         today = date(2026, 11, 1)
@@ -59,6 +63,30 @@ class DisplayTests(unittest.TestCase):
         image.seek(1)
         self.assertNotEqual(first, image.convert("RGB").tobytes())
         self.assertLess(len(animation.getvalue()), 8 * 1024 * 1024)
+
+    def test_single_flame_badge_red_standard_and_blue_at_500(self):
+        data = {"participants": {}, "legacy_scores": {
+            "Standard": {"streak": 15}, "Highest": {"streak": 500},
+            "Almost": {"streak": 499},
+        }}
+        with patch.dict(FIRE_EMOJIS, {"red": "<:red_fire:1>", "blue": "<:blue_fire:2>",
+                                     "purple": "<:purple_fire:3>"}):
+            embed = leaderboard_embed(data, date(2026, 11, 1))
+        self.assertIn("<:blue_fire:2>", embed.fields[0].name)
+        self.assertIn("<:purple_fire:3>", embed.fields[1].name)
+        self.assertIn("<:red_fire:1>", embed.fields[2].name)
+        for field in embed.fields:
+            self.assertEqual(field.name.count("<:"), 1)
+            self.assertNotIn("fire", field.value)
+        for medal in ("🥇", "🥈", "🥉", "🏆", "💎"):
+            self.assertNotIn(medal, str(embed.to_dict()))
+
+    def test_generated_red_and_blue_flames_are_distinct_transparent_pngs(self):
+        red = Image.open(io.BytesIO(flame_png(0xEF4444)))
+        blue = Image.open(io.BytesIO(flame_png(0x3B82F6)))
+        self.assertEqual(red.mode, "RGBA")
+        self.assertEqual(red.getpixel((0, 0))[3], 0)
+        self.assertNotEqual(red.tobytes(), blue.tobytes())
 
 
 if __name__ == "__main__":
