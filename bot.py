@@ -15,7 +15,9 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
-from shark_race import SHARK_COLORS, SHARK_COLOR_NAMES, SHARK_KINDS, race_attachments, shark_style
+from shark_race import (
+    SHARK_COLORS, SHARK_COLOR_NAMES, SHARK_KINDS, race_attachments, shark_preview, shark_style,
+)
 from streak_display import (
     FIRE_EMOJIS, FIRE_EMOJI_PREFIX, FIRE_TIERS, flame_badge, flame_png,
     leaderboard_embed, milestone_gif, tier, week_embed,
@@ -346,9 +348,6 @@ async def set_schedule(member, text, channel):
             person["name"] = member.display_name
         save_data(data)
         await persist_discord_state(channel)
-    label = ", ".join(DAYS[day].title() for day in days) if days else "off (paused)"
-    await channel.send(f"{member.mention} Schedule: **{label}** (Pacific time). "
-                       f"Streak: **{person['streak']}**.")
     await refresh_reminders(channel, load_data())
 
 
@@ -357,20 +356,17 @@ async def handle_action(member, action, channel, reminder_date=None):
         today = today_pt()
         if reminder_date is not None and reminder_date != today.isoformat():
             text = "That reminder's Pacific day has ended."
-            await channel.send(f"{member.mention} {text}")
             return text
         data = load_data()
         person = data["participants"].get(str(member.id))
         if person is None:
             text = "Set your schedule first with **My schedule** or `!schedule daily`."
-            await channel.send(f"{member.mention} {text}")
             return text
         person["name"] = member.display_name
         text, milestone = record(person, today, action)
         save_data(data)
         await persist_discord_state(channel)
         await refresh_reminders(channel, data)
-        await channel.send(f"{member.mention} {text}")
         if milestone:
             await celebrate_milestone(member, person["streak"], channel)
         return text
@@ -428,53 +424,93 @@ class ScheduleModal(discord.ui.Modal, title="Your speaking schedule"):
                                                     ephemeral=True)
 
 
-class ProfileModal(discord.ui.Modal, title="Your shark profile"):
+class ProfileView(discord.ui.View):
     def __init__(self, member, person):
-        super().__init__()
+        super().__init__(timeout=600)
         self.owner_id = member.id
-        if person:
-            self.add_item(discord.ui.TextDisplay(week_embed(person, today_pt()).description))
+        self.member = member
+        self._edit_lock = asyncio.Lock()
         color, kind = shark_style(member.display_name, person)
-        self.color = discord.ui.Select(options=[
+        self.selected_color, self.selected_kind = color, kind
+        self.color = discord.ui.Select(placeholder="Shark color", row=0, options=[
             discord.SelectOption(label=name, value=value, default=value == color)
             for name, value in zip(SHARK_COLOR_NAMES, SHARK_COLORS)
         ])
-        self.kind = discord.ui.Select(options=[
+        self.kind = discord.ui.Select(placeholder="Shark type", row=1, options=[
             discord.SelectOption(label=value.title() + " shark", value=value, default=value == kind)
             for value in SHARK_KINDS
         ])
-        self.add_item(discord.ui.Label(text="Shark color", component=self.color))
-        self.add_item(discord.ui.Label(text="Shark type", component=self.kind))
+        self.color.callback = self.change_color
+        self.kind.callback = self.change_kind
+        self.add_item(self.color)
+        self.add_item(self.kind)
 
-    async def on_submit(self, interaction):
+    async def interaction_check(self, interaction):
         if (interaction.user.id != self.owner_id or interaction.channel_id != CHANNEL_ID
                 or _state_message is None):
             await interaction.response.send_message("Please reopen your profile.", ephemeral=True)
+            return False
+        return True
+
+    async def preview(self):
+        person = load_data()["participants"].get(str(self.owner_id))
+        embed = week_embed(person, today_pt()) if person else discord.Embed(
+            description="Choose My schedule to start speaking commitments.")
+        embed.title = "Your shark profile"
+        color_name = SHARK_COLOR_NAMES[SHARK_COLORS.index(self.selected_color)]
+        embed.add_field(name="Shark", value=f"{color_name} / {self.selected_kind.title()}", inline=False)
+        embed.set_footer(text="Preview only until Save - Pacific time")
+        embed.set_image(url="attachment://shark-profile.png")
+        image = await asyncio.to_thread(shark_preview, self.member.display_name,
+                                        self.selected_color, self.selected_kind)
+        return embed, discord.File(io.BytesIO(image), filename="shark-profile.png")
+
+    async def change_color(self, interaction):
+        await self.change(interaction, self.color, SHARK_COLORS, "selected_color")
+
+    async def change_kind(self, interaction):
+        await self.change(interaction, self.kind, SHARK_KINDS, "selected_kind")
+
+    async def change(self, interaction, select, allowed, field):
+        if not await self.interaction_check(interaction):
             return
-        color, kind = self.color.values[0], self.kind.values[0]
-        if color not in SHARK_COLORS or kind not in SHARK_KINDS:
+        value = select.values[0]
+        if value not in allowed:
             await interaction.response.send_message("Choose a listed color and shark.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
-        async with _action_lock:
-            data = load_data()
-            person = data["participants"].get(str(self.owner_id))
-            if person is None:
-                legacy_name = _legacy_match(interaction.user, data)
-                baseline = data["legacy_scores"].pop(legacy_name, {"streak": 0})
-                person = new_person(interaction.user.display_name, [], today_pt(), baseline["streak"],
-                                    data.get("legacy_freeze_counts", {}).get(legacy_name, 0))
-                data["participants"][str(self.owner_id)] = person
-            person.update(shark_color=color, shark_type=kind)
-            save_data(data)
-            await persist_discord_state(interaction.channel)
-            await refresh_reminders(interaction.channel, data)
-        await interaction.followup.send(
-            "Your shark profile is saved. Your schedule and speaking records are unchanged.",
-            ephemeral=True)
+        await interaction.response.defer()
+        async with self._edit_lock:
+            setattr(self, field, value)
+            for option in select.options:
+                option.default = option.value == value
+            embed, file = await self.preview()
+            await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
 
-    async def on_error(self, interaction, error):
-        log.error("Profile modal failed: %s", error)
+    @discord.ui.button(label="Save", style=discord.ButtonStyle.success, row=2)
+    async def save(self, interaction, button):
+        if not await self.interaction_check(interaction):
+            return
+        await interaction.response.defer()
+        async with self._edit_lock:
+            async with _action_lock:
+                data = load_data()
+                person = data["participants"].get(str(self.owner_id))
+                if person is None:
+                    legacy_name = _legacy_match(interaction.user, data)
+                    baseline = data["legacy_scores"].pop(legacy_name, {"streak": 0})
+                    person = new_person(interaction.user.display_name, [], today_pt(), baseline["streak"],
+                                        data.get("legacy_freeze_counts", {}).get(legacy_name, 0))
+                    data["participants"][str(self.owner_id)] = person
+                person.update(shark_color=self.selected_color, shark_type=self.selected_kind)
+                save_data(data)
+                await persist_discord_state(interaction.channel)
+                await refresh_reminders(interaction.channel, data)
+            embed, file = await self.preview()
+            embed.set_footer(text="Profile saved - Your schedule and speaking records are unchanged")
+            await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+
+    async def on_error(self, interaction, error, item):
+        log.error("Profile preview failed: %s", error)
         if interaction.response.is_done():
             await interaction.followup.send("Couldn't save your profile. Please retry.", ephemeral=True)
         else:
@@ -529,7 +565,10 @@ class ReminderView(discord.ui.View):
     async def week(self, interaction, button):
         data = load_data()
         person = data["participants"].get(str(interaction.user.id))
-        await interaction.response.send_modal(ProfileModal(interaction.user, person))
+        await interaction.response.defer(ephemeral=True)
+        view = ProfileView(interaction.user, person)
+        embed, file = await view.preview()
+        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
 
     async def on_error(self, interaction, error, item):
         log.error("Reminder button failed: %s", error)
@@ -606,7 +645,7 @@ async def dispatch(member, text, channel):
             "`@Squolingo repair @debater total` - correct a verified total "
             "(Manage Server permission required).\n"
             "Use **Spoke**, **Freeze**, **My schedule**, and **My profile** buttons. "
-            "My profile shows your week and chooses your shark color/type in a private modal.\n"
+            "My profile shows your week and live shark preview privately. Choose color/type, then Save.\n"
             "Repeated clicks count only once. Emoji reactions no longer record speaking.\n"
             "Major milestones at 50, 100, 200, 300 (and each later hundred) get animated cards.\n"
             "All schedules use Pacific time. Only missed scheduled days reset "

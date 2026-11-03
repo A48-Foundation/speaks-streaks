@@ -385,11 +385,13 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         data = bot.load_data()
         data["participants"]["5"] = new_person("Debater", [1], date(2026, 10, 20), 7)
         bot.save_data(data)
-        interaction = Mock(user=self.member, response=Mock(send_modal=AsyncMock()))
+        interaction = Mock(user=self.member, response=Mock(defer=AsyncMock()),
+                           followup=Mock(send=AsyncMock()))
         await bot.ReminderView().children[3].callback(interaction)
-        modal = interaction.response.send_modal.call_args.args[0]
-        self.assertIsInstance(modal, bot.ProfileModal)
-        self.assertIn("Tue 20", modal.children[0].content)
+        result = interaction.followup.send.call_args.kwargs
+        self.assertIsInstance(result["view"], bot.ProfileView)
+        self.assertIn("Tue 20", result["embed"].description)
+        self.assertTrue(result["ephemeral"])
 
     async def test_profile_button_saves_only_own_appearance_and_preserves_records(self):
         data = bot.load_data()
@@ -398,15 +400,15 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         data["participants"]["5"] = person
         bot.save_data(data)
         interaction = Mock(user=self.member, channel=self.channel, channel_id=bot.CHANNEL_ID,
-                           response=Mock(send_modal=AsyncMock(), defer=AsyncMock()),
+                           response=Mock(defer=AsyncMock()), edit_original_response=AsyncMock(),
                            followup=Mock(send=AsyncMock()))
         await bot.ReminderView().children[3].callback(interaction)
-        modal = interaction.response.send_modal.call_args.args[0]
-        modal.color._values = ["#ff729e"]
-        modal.kind._values = ["hammerhead"]
+        view = interaction.followup.send.call_args.kwargs["view"]
+        view.selected_color = "#ff729e"
+        view.selected_kind = "hammerhead"
         with patch.object(bot, "persist_discord_state", AsyncMock()) as persist, \
                 patch.object(bot, "refresh_reminders", AsyncMock()):
-            await modal.on_submit(interaction)
+            await view.save.callback(interaction)
         saved = bot.load_data()["participants"]["5"]
         self.assertEqual(saved, dict(person, shark_color="#ff729e", shark_type="hammerhead"))
         persist.assert_awaited_once()
@@ -417,26 +419,54 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         data = bot.load_data()
         data["legacy_scores"] = {"Debater": {"streak": 232}}
         bot.save_data(data)
-        modal = bot.ProfileModal(self.member, None)
-        modal.color._values = ["#28e1ef"]
-        modal.kind._values = ["whale"]
+        view = bot.ProfileView(self.member, None)
+        view.selected_color = "#28e1ef"
+        view.selected_kind = "whale"
         interaction = Mock(user=self.member, channel=self.channel, channel_id=bot.CHANNEL_ID,
-                           response=Mock(defer=AsyncMock()), followup=Mock(send=AsyncMock()))
+                           response=Mock(defer=AsyncMock()), edit_original_response=AsyncMock())
         with patch.object(bot, "persist_discord_state", AsyncMock()), \
                 patch.object(bot, "refresh_reminders", AsyncMock()):
-            await modal.on_submit(interaction)
+            await view.save.callback(interaction)
         person = bot.load_data()["participants"]["5"]
         self.assertEqual((person["streak"], person["schedule"]), (232, []))
         self.assertNotIn("Debater", bot.load_data()["legacy_scores"])
 
-    async def test_profile_modal_rejects_another_user_without_changing_state(self):
-        modal = bot.ProfileModal(self.member, None)
+    async def test_profile_preview_rejects_another_user_without_changing_state(self):
+        view = bot.ProfileView(self.member, None)
         interaction = Mock(user=Mock(id=6), channel_id=bot.CHANNEL_ID,
                            response=Mock(send_message=AsyncMock()))
         before = bot.load_data()
-        await modal.on_submit(interaction)
+        await view.save.callback(interaction)
         self.assertEqual(bot.load_data(), before)
         self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
+
+    async def test_dropdown_updates_preview_in_place_without_saving(self):
+        view = bot.ProfileView(self.member, None)
+        view.color._values = ["#ff729e"]
+        view.kind._values = ["hammerhead"]
+        interaction = Mock(user=self.member, channel_id=bot.CHANNEL_ID,
+                           response=Mock(defer=AsyncMock()), edit_original_response=AsyncMock())
+        before = bot.load_data()
+        await view.change_color(interaction)
+        first_image = interaction.edit_original_response.call_args.kwargs["attachments"][0].fp.getvalue()
+        await view.change_kind(interaction)
+        updated = interaction.edit_original_response.call_args.kwargs
+        self.assertNotEqual(first_image, updated["attachments"][0].fp.getvalue())
+        self.assertEqual(updated["embed"].image.url, "attachment://shark-profile.png")
+        self.assertEqual((view.selected_color, view.selected_kind), ("#ff729e", "hammerhead"))
+        self.assertEqual(bot.load_data(), before)
+        self.assertEqual(interaction.edit_original_response.await_count, 2)
+        self.channel.send.assert_not_awaited()
+
+    async def test_schedule_freeze_and_speak_do_not_post_channel_confirmations(self):
+        with patch.object(bot, "persist_discord_state", AsyncMock()), \
+                patch.object(bot, "refresh_reminders", AsyncMock()):
+            await bot.set_schedule(self.member, "tue", self.channel)
+            await bot.handle_action(self.member, "frozen", self.channel)
+            await bot.handle_action(self.member, "yes", self.channel)
+            await bot.handle_action(self.member, "yes", self.channel)
+        self.assertEqual(bot.load_data()["participants"]["5"]["streak"], 1)
+        self.channel.send.assert_not_awaited()
 
     async def test_major_milestone_sends_one_animation_not_on_repeat(self):
         data = bot.load_data()

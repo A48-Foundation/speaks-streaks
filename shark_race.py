@@ -57,6 +57,15 @@ def race_attachments(data, today):
                    duration=200, loop=0, optimize=True)
     return [output.getvalue()]
 
+def shark_preview(name, color, kind):
+    frame = shark_race_gif([(name, 150, "Scheduled")],
+                           profiles={0: {"shark_color": color, "shark_type": kind}})[0]
+    image = frame.crop((250 * SCALE, 77 * SCALE, 308 * SCALE, 112 * SCALE))
+    image = image.resize((464, 280), Image.Resampling.NEAREST)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
 
 def shark_race_gif(rows, goal=300, profiles=None):
     """Use one shared scale; animation never changes a shark's streak position."""
