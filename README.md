@@ -101,22 +101,21 @@ work after restarts. My schedule opens a form; My profile includes a private
 seven-day completion grid. Old reminder action buttons cannot backdate credit.
 Mention commands still work; reaction controls have been retired.
 
-**My profile** replaces My week and opens a private interactive card with this
-week's summary, a shark preview, and dropdowns for twelve colors
+**My profile** replaces My week and opens a native Discord modal with this
+week's summary and dropdowns for twelve colors
 and reef, hammerhead, tiger, or whale sharks. Choices are saved in the Discord
 state snapshot and survive deployments. Existing schedules, streaks, and
 speaking records are unchanged. First-time profile setup preserves matched
 legacy scores and leaves commitments paused until a schedule is chosen.
 
-Changing a dropdown updates the shark image in the same private card immediately.
-Click **Save** to persist the choices; previewing alone does not change your profile.
-Discord modals cannot live-update images, so this uses private message components.
-Saving updates the private card, never posting a channel confirmation.
+Submit the modal to save choices and refresh existing race messages.
+There is no live preview card or save-confirmation message.
 Reopening My profile shows the latest weekly summary.
 
 Speaking, freezing, and schedule changes update existing reminders without
-posting channel confirmations. Button/modal confirmations are private;
-mention-command updates are silent. Milestone congratulations remain public.
+posting confirmation messages. Successful button/modal actions are acknowledged
+silently; errors may be shown privately. Mention-command updates are silent.
+Milestone congratulations remain public.
 
 Milestones at **50, 100, 200, 300**, and each later hundred get an original,
 locally generated confetti GIF card. Other ten-day milestones retain a simple
