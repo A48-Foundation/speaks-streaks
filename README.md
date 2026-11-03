@@ -101,6 +101,18 @@ work after restarts. My schedule opens a form; My week shows a private
 seven-day completion grid. Old reminder action buttons cannot backdate credit.
 Mention commands still work; reaction controls have been retired.
 
+**My profile** opens a native Discord modal with dropdowns for twelve colors
+and reef, hammerhead, tiger, or whale sharks. Choices are saved in the Discord
+state snapshot and survive deployments. Existing schedules, streaks, and
+speaking records are unchanged. First-time profile setup preserves matched
+legacy scores and leaves commitments paused until a schedule is chosen.
+
+**My week** opens a native modal showing this week's summary and a week
+selector. Submitting a selection returns a private summary, never a channel
+message. Discord modals cannot update their contents live when a dropdown
+changes; reopening My week shows the current summary. Prior-week summaries
+show recorded history only, not guessed historical schedules.
+
 Milestones at **50, 100, 200, 300**, and each later hundred get an original,
 locally generated confetti GIF card. Other ten-day milestones retain a simple
 congratulation. Duplicate actions and leaderboard refreshes do not replay

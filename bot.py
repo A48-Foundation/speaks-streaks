@@ -15,7 +15,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from streaks import DAYS, new_person, parse_schedule, reconcile, record
-from shark_race import race_attachments
+from shark_race import SHARK_COLORS, SHARK_COLOR_NAMES, SHARK_KINDS, race_attachments, shark_style
 from streak_display import (
     FIRE_EMOJIS, FIRE_EMOJI_PREFIX, FIRE_TIERS, flame_badge, flame_png,
     leaderboard_embed, milestone_gif, tier, week_embed,
@@ -428,6 +428,98 @@ class ScheduleModal(discord.ui.Modal, title="Your speaking schedule"):
                                                     ephemeral=True)
 
 
+class ProfileModal(discord.ui.Modal, title="Your shark profile"):
+    def __init__(self, member, person):
+        super().__init__()
+        self.owner_id = member.id
+        color, kind = shark_style(member.display_name, person)
+        self.color = discord.ui.Select(options=[
+            discord.SelectOption(label=name, value=value, default=value == color)
+            for name, value in zip(SHARK_COLOR_NAMES, SHARK_COLORS)
+        ])
+        self.kind = discord.ui.Select(options=[
+            discord.SelectOption(label=value.title() + " shark", value=value, default=value == kind)
+            for value in SHARK_KINDS
+        ])
+        self.add_item(discord.ui.Label(text="Shark color", component=self.color))
+        self.add_item(discord.ui.Label(text="Shark type", component=self.kind))
+
+    async def on_submit(self, interaction):
+        if (interaction.user.id != self.owner_id or interaction.channel_id != CHANNEL_ID
+                or _state_message is None):
+            await interaction.response.send_message("Please reopen your profile.", ephemeral=True)
+            return
+        color, kind = self.color.values[0], self.kind.values[0]
+        if color not in SHARK_COLORS or kind not in SHARK_KINDS:
+            await interaction.response.send_message("Choose a listed color and shark.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with _action_lock:
+            data = load_data()
+            person = data["participants"].get(str(self.owner_id))
+            if person is None:
+                legacy_name = _legacy_match(interaction.user, data)
+                baseline = data["legacy_scores"].pop(legacy_name, {"streak": 0})
+                person = new_person(interaction.user.display_name, [], today_pt(), baseline["streak"],
+                                    data.get("legacy_freeze_counts", {}).get(legacy_name, 0))
+                data["participants"][str(self.owner_id)] = person
+            person.update(shark_color=color, shark_type=kind)
+            save_data(data)
+            await persist_discord_state(interaction.channel)
+            await refresh_reminders(interaction.channel, data)
+        await interaction.followup.send(
+            "Your shark profile is saved. Your schedule and speaking records are unchanged.",
+            ephemeral=True)
+
+    async def on_error(self, interaction, error):
+        log.error("Profile modal failed: %s", error)
+        if interaction.response.is_done():
+            await interaction.followup.send("Couldn't save your profile. Please retry.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Couldn't save your profile. Please retry.",
+                                                    ephemeral=True)
+
+
+class WeekModal(discord.ui.Modal, title="Your speaking week"):
+    def __init__(self, member, person):
+        super().__init__()
+        self.owner_id = member.id
+        summary = week_embed(person, today_pt())
+        self.add_item(discord.ui.TextDisplay(summary.description))
+        self.period = discord.ui.Select(options=[
+            discord.SelectOption(label="This week", value="0", default=True),
+            discord.SelectOption(label="Last week", value="1"),
+            discord.SelectOption(label="Two weeks ago", value="2"),
+            discord.SelectOption(label="Three weeks ago", value="3"),
+        ])
+        self.add_item(discord.ui.Label(text="View a week", component=self.period,
+                                      description="Pacific time. Submit for a private week summary."))
+
+    async def on_submit(self, interaction):
+        person = load_data()["participants"].get(str(interaction.user.id))
+        if (interaction.user.id != self.owner_id or interaction.channel_id != CHANNEL_ID
+                or _state_message is None or person is None):
+            await interaction.response.send_message("Please reopen My week.", ephemeral=True)
+            return
+        offset = self.period.values[0]
+        if offset not in ("0", "1", "2", "3"):
+            await interaction.response.send_message("Choose a listed week.", ephemeral=True)
+            return
+        day = today_pt() - timedelta(weeks=int(offset))
+        summary = week_embed(person, day)
+        if offset != "0":
+            lines = []
+            start = day - timedelta(days=day.weekday())
+            for index, label in enumerate(DAYS):
+                date_key = (start + timedelta(days=index)).isoformat()
+                result = person["results"].get(date_key)
+                status = "Spoken" if result == "yes" else "Frozen" if result == "frozen" else "No record"
+                lines.append(f"**{label.title()} {date_key}** - {status}")
+            summary.description = "\n".join(lines)
+            summary.set_footer(text="Pacific time - Recorded history only; current streak shown")
+        await interaction.response.send_message(embed=summary, ephemeral=True)
+
+
 class ReminderView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -478,8 +570,13 @@ class ReminderView(discord.ui.View):
         if person is None:
             await interaction.response.send_message("Choose **My schedule** first.", ephemeral=True)
             return
-        await interaction.response.send_message(embed=week_embed(person, today_pt()),
-                                                ephemeral=True)
+        await interaction.response.send_modal(WeekModal(interaction.user, person))
+
+    @discord.ui.button(label="My profile", emoji="🦈", style=discord.ButtonStyle.secondary,
+                       custom_id="squolingo:profile")
+    async def profile(self, interaction, button):
+        person = load_data()["participants"].get(str(interaction.user.id))
+        await interaction.response.send_modal(ProfileModal(interaction.user, person))
 
     async def on_error(self, interaction, error, item):
         log.error("Reminder button failed: %s", error)
@@ -555,7 +652,8 @@ async def dispatch(member, text, channel):
             "`@Squolingo test reminders` - send both reminders.\n"
             "`@Squolingo repair @debater total` - correct a verified total "
             "(Manage Server permission required).\n"
-            "Use **Spoke**, **Freeze**, **My schedule**, and **My week** buttons. "
+            "Use **Spoke**, **Freeze**, **My schedule**, **My week**, and **My profile** buttons. "
+            "My profile chooses your shark color/type; My week opens a private modal.\n"
             "Repeated clicks count only once. Emoji reactions no longer record speaking.\n"
             "Major milestones at 50, 100, 200, 300 (and each later hundred) get animated cards.\n"
             "All schedules use Pacific time. Only missed scheduled days reset "

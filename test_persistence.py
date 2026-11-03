@@ -34,6 +34,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         data["participants"]["5"] = bot.new_person(
             "Debater", [1, 3], datetime(2026, 10, 25).date(), 227
         )
+        data["participants"]["5"].update(shark_color="#ff729e", shark_type="hammerhead")
         bot.save_data(data)
         bot.save_frozen_dates({"debater": {"2026-10-25"}})
         await bot.persist_discord_state(self.channel)
@@ -48,6 +49,8 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.load_frozen_dates(), {"debater": {"2026-10-25"}})
         self.assertEqual(bot.load_data()["participants"]["5"]["schedule"], [1, 3])
         self.assertEqual(bot.load_data()["participants"]["5"]["streak"], 227)
+        self.assertEqual(bot.load_data()["participants"]["5"]["shark_type"], "hammerhead")
+        self.assertEqual(bot.load_data()["participants"]["5"]["shark_color"], "#ff729e")
         bot.save_frozen_dates({"debater": {"2026-10-25", "2026-10-30"}})
         await bot.persist_discord_state(self.channel)
         self.message.edit.assert_awaited_once()

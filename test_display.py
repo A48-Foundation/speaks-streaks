@@ -73,7 +73,10 @@ class DisplayTests(unittest.TestCase):
         with patch("shark_race.shark_race_gif", wraps=shark_race_gif) as render:
             images = race_attachments(data, today)
         self.assertEqual(len(images), 1)
-        render.assert_called_once_with(rows, 600)
+        self.assertEqual(render.call_count, 1)
+        self.assertEqual(render.call_args.args, (rows, 600))
+        self.assertEqual(render.call_args.kwargs["profiles"][0], spoken)
+        self.assertEqual(render.call_args.kwargs["profiles"][1], frozen)
         with Image.open(io.BytesIO(images[0])) as image:
             self.assertEqual(image.size, (1024, 870))
             self.assertLess(len(images[0]), 8 * 1024 * 1024)
@@ -100,6 +103,27 @@ class DisplayTests(unittest.TestCase):
                (nose + 5) * SCALE, (71 + 42) * SCALE)
         shifted = (box[0], box[1] + 55 * SCALE, box[2], box[3] + 55 * SCALE)
         self.assertEqual(original.crop(box).tobytes(), reordered.crop(shifted).tobytes())
+
+    def test_profile_overrides_shark_appearance_and_invalid_values_fall_back(self):
+        profile = {"shark_color": "#ff729e", "shark_type": "hammerhead"}
+        self.assertEqual(shark_style("Debater", profile), ("#ff729e", "hammerhead"))
+        self.assertEqual(shark_style("Debater", {"shark_color": "bad", "shark_type": "bad"}),
+                         shark_style("Debater"))
+        original = shark_race_gif([("Debater", 61, "Spoken")])[0]
+        customized = shark_race_gif([("Debater", 61, "Spoken")],
+                                    profiles={0: profile})[0]
+        self.assertNotEqual(original.tobytes(), customized.tobytes())
+
+    def test_same_display_name_does_not_share_profile_choices(self):
+        today = date(2026, 11, 1)
+        first = new_person("Same name", [6], today, 61)
+        second = new_person("Same name", [6], today, 50)
+        first.update(shark_color="#ff729e", shark_type="hammerhead")
+        second.update(shark_color="#28e1ef", shark_type="whale")
+        with patch("shark_race.shark_race_gif", wraps=shark_race_gif) as render:
+            race_attachments({"participants": {"1": first, "2": second},
+                              "legacy_scores": {}}, today)
+        self.assertEqual(render.call_args.kwargs["profiles"], {0: first, 1: second})
 
     def test_race_rejects_scores_outside_shared_track(self):
         for rows, goal in (([], 300), ([("Debater", -1, "Spoken")], 300),

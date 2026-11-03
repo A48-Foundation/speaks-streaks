@@ -12,12 +12,21 @@ SHARK_COLORS = (
     "#f77c55", "#f1df65", "#e586eb", "#55d5c3", "#a7dc68", "#e5c5a3",
 )
 SHARK_KINDS = ("reef", "hammerhead", "tiger", "whale")
+SHARK_COLOR_NAMES = ("Cyan", "Purple", "Gold", "Pink", "Mint", "Blue",
+                     "Coral", "Yellow", "Magenta", "Teal", "Lime", "Sand")
 SCALE = 2
 
 
-def shark_style(name):
+def shark_style(name, profile=None):
     digest = hashlib.sha256(name.casefold().encode("utf-8")).digest()
-    return SHARK_COLORS[digest[0] % len(SHARK_COLORS)], SHARK_KINDS[digest[1] % len(SHARK_KINDS)]
+    color = SHARK_COLORS[digest[0] % len(SHARK_COLORS)]
+    kind = SHARK_KINDS[digest[1] % len(SHARK_KINDS)]
+    if profile:
+        if profile.get("shark_color") in SHARK_COLORS:
+            color = profile["shark_color"]
+        if profile.get("shark_type") in SHARK_KINDS:
+            kind = profile["shark_type"]
+    return color, kind
 
 
 def race_rows(data, today):
@@ -36,14 +45,20 @@ def race_attachments(data, today):
     if not rows:
         return []
     goal = max(300, (max(row[1] for row in rows) // 100 + 1) * 100)
-    frames = shark_race_gif(rows, goal)
+    people = [(person["name"], person["streak"], person)
+              for person in data["participants"].values()]
+    people.extend((name, person["streak"], {}) for name, person in data["legacy_scores"].items())
+    people = sorted((person for person in people if person[1] > 0),
+                    key=lambda person: (-person[1], person[0]))
+    profiles = {rank: person for rank, (_, _, person) in enumerate(people)}
+    frames = shark_race_gif(rows, goal, profiles=profiles)
     output = io.BytesIO()
     frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:],
                    duration=200, loop=0, optimize=True)
     return [output.getvalue()]
 
 
-def shark_race_gif(rows, goal=300):
+def shark_race_gif(rows, goal=300, profiles=None):
     """Use one shared scale; animation never changes a shark's streak position."""
     if goal <= 0 or not rows or any(streak < 0 or streak > goal for _, streak, _ in rows):
         raise ValueError("Provide racers with streaks between zero and the shared goal.")
@@ -70,7 +85,7 @@ def shark_race_gif(rows, goal=300):
         for rank, (name, streak, status) in enumerate(rows):
             top = 71 + rank * 55
             center = top + 24
-            accent, kind = shark_style(name)
+            accent, kind = shark_style(name, (profiles or {}).get(rank))
             draw.rectangle((12, top, 499, top + 49), fill="#102839", outline="#204457")
             clean_name = name.replace("\n", " ").replace("\r", " ")[:60]
             name_label = f"{rank + 1:02}  {clean_name}"

@@ -1,4 +1,4 @@
-discord.py>=2.5
+discord.py>=2.6
 python-dotenv
 tzdata
 Pillow>=10.1
