@@ -388,7 +388,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         interaction = Mock(user=self.member, response=Mock(send_modal=AsyncMock()))
         await bot.ReminderView().children[3].callback(interaction)
         modal = interaction.response.send_modal.call_args.args[0]
-        self.assertIsInstance(modal, bot.WeekModal)
+        self.assertIsInstance(modal, bot.ProfileModal)
         self.assertIn("Tue 20", modal.children[0].content)
 
     async def test_profile_button_saves_only_own_appearance_and_preserves_records(self):
@@ -400,7 +400,7 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         interaction = Mock(user=self.member, channel=self.channel, channel_id=bot.CHANNEL_ID,
                            response=Mock(send_modal=AsyncMock(), defer=AsyncMock()),
                            followup=Mock(send=AsyncMock()))
-        await bot.ReminderView().children[4].callback(interaction)
+        await bot.ReminderView().children[3].callback(interaction)
         modal = interaction.response.send_modal.call_args.args[0]
         modal.color._values = ["#ff729e"]
         modal.kind._values = ["hammerhead"]
@@ -437,23 +437,6 @@ class DiscordFlowTests(unittest.IsolatedAsyncioTestCase):
         await modal.on_submit(interaction)
         self.assertEqual(bot.load_data(), before)
         self.assertTrue(interaction.response.send_message.call_args.kwargs["ephemeral"])
-
-    async def test_week_modal_past_summary_is_private_and_does_not_invent_schedule_history(self):
-        data = bot.load_data()
-        person = new_person("Debater", [1], date(2026, 10, 20), 61)
-        person["results"]["2026-10-13"] = "yes"
-        data["participants"]["5"] = person
-        bot.save_data(data)
-        modal = bot.WeekModal(self.member, person)
-        modal.period._values = ["1"]
-        interaction = Mock(user=self.member, channel_id=bot.CHANNEL_ID,
-                           response=Mock(send_message=AsyncMock()))
-        await modal.on_submit(interaction)
-        result = interaction.response.send_message.call_args.kwargs
-        self.assertTrue(result["ephemeral"])
-        self.assertIn("2026-10-13** - Spoken", result["embed"].description)
-        self.assertIn("No record", result["embed"].description)
-        self.channel.send.assert_not_awaited()
 
     async def test_major_milestone_sends_one_animation_not_on_repeat(self):
         data = bot.load_data()

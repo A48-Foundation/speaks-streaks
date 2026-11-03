@@ -96,22 +96,20 @@ number, not another medal. The bot generates and reuses its own application
 emojis at startup; no server emoji uploads are needed. If the emoji API is
 unavailable, a standard flame plus the color's name is shown instead.
 
-Persistent **Spoke**, **Freeze**, **My schedule**, and **My week** buttons
-work after restarts. My schedule opens a form; My week shows a private
+Persistent **Spoke**, **Freeze**, **My schedule**, and **My profile** buttons
+work after restarts. My schedule opens a form; My profile includes a private
 seven-day completion grid. Old reminder action buttons cannot backdate credit.
 Mention commands still work; reaction controls have been retired.
 
-**My profile** opens a native Discord modal with dropdowns for twelve colors
+**My profile** replaces My week and opens a native Discord modal with this
+week's summary and dropdowns for twelve colors
 and reef, hammerhead, tiger, or whale sharks. Choices are saved in the Discord
 state snapshot and survive deployments. Existing schedules, streaks, and
 speaking records are unchanged. First-time profile setup preserves matched
 legacy scores and leaves commitments paused until a schedule is chosen.
 
-**My week** opens a native modal showing this week's summary and a week
-selector. Submitting a selection returns a private summary, never a channel
-message. Discord modals cannot update their contents live when a dropdown
-changes; reopening My week shows the current summary. Prior-week summaries
-show recorded history only, not guessed historical schedules.
+Saving a profile sends only a private confirmation, never a channel message.
+Reopening My profile shows the latest weekly summary.
 
 Milestones at **50, 100, 200, 300**, and each later hundred get an original,
 locally generated confetti GIF card. Other ten-day milestones retain a simple
